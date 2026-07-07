@@ -1,0 +1,7 @@
+APScheduler==3.11.3
+python-dotenv==1.2.2
+pytz==2026.2
+requests==2.34.2
+
+# (선택) LLM 요약 연동 시 주석 해제
+# anthropic
