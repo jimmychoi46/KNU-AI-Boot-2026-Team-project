@@ -1,0 +1,20 @@
+# 관리자 비밀번호 등 민감정보 (실제 값은 커밋하지 않음 — secrets.toml.example 참고)
+.streamlit/secrets.toml
+
+# 백엔드 연동 주소 등 환경변수
+.env
+.env.local
+
+# 구독자 개인정보 (과거 CSV 저장 방식의 흔적 — 이제는 백엔드 API/DB가 원천)
+subscribers.csv
+data/
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -17,13 +17,21 @@ if admin_password != st.secrets["admin_password"]:
 
 st.success("관리자 인증 완료")
 
-df = load_subscribers()
-stats = get_statistics()
+# 백엔드(GET /subscribers)도 같은 비밀번호를 X-Admin-Password 헤더로 요구한다.
+# .env의 ADMIN_PASSWORD와 이 앱의 secrets.toml의 admin_password가 같은 값이어야 한다.
+df, error = load_subscribers(admin_password)
 
-col1, col2, col3 = st.columns(3)
+if error:
+    st.error(f"구독자 목록을 불러오지 못했습니다: {error}")
+    st.stop()
+
+stats = get_statistics(df)
+
+col1, col2, col3, col4 = st.columns(4)
 col1.metric("전체 구독자 수", stats["total_subscribers"])
-col2.metric("가장 많은 발송 주기", stats["most_common_frequency"])
-col3.metric("가장 많은 언어", stats["most_common_language"])
+col2.metric("이메일 확인 완료", stats["confirmed_count"])
+col3.metric("가장 많은 발송 주기", stats["most_common_frequency"])
+col4.metric("가장 많은 언어", stats["most_common_language"])
 
 st.subheader("구독자 목록")
 
@@ -44,8 +52,8 @@ else:
 
     send_time_options = generate_time_options()
     frequency_options = ["매일", "주 3회", "매주"]
-    summary_length_options = ["짧게", "보통", "길게"]
-    language_options = ["한국어", "English"]
+    summary_length_options = ["짧게", "중간", "길게"]
+    language_options = ["한국어", "영어"]
 
     edit_name = st.text_input("이름 수정", value=selected_row["name"])
     edit_email = st.text_input("이메일 수정", value=selected_row["email"])
@@ -94,7 +102,7 @@ else:
         if not edit_name or not edit_email or not edit_keywords:
             st.warning("이름, 이메일, 관심 키워드를 모두 입력해 주세요.")
         else:
-            success = update_subscriber(
+            success, message = update_subscriber(
                 old_email=selected_email_for_edit,
                 name=edit_name,
                 new_email=edit_email,
@@ -106,10 +114,10 @@ else:
             )
 
             if success:
-                st.success("구독자 정보가 수정되었습니다.")
+                st.success(message or "구독자 정보가 수정되었습니다.")
                 st.rerun()
             else:
-                st.error("수정에 실패했습니다.")
+                st.error(message or "수정에 실패했습니다.")
 
     st.subheader("구독자 삭제")
 
@@ -120,10 +128,10 @@ else:
     )
 
     if st.button("선택한 구독자 삭제"):
-        success = delete_subscriber(selected_email_for_delete)
+        success, message = delete_subscriber(selected_email_for_delete)
 
         if success:
             st.success(f"{selected_email_for_delete} 구독 정보가 삭제되었습니다.")
             st.rerun()
         else:
-            st.error("삭제에 실패했습니다.")
+            st.error(message or "삭제에 실패했습니다.")
