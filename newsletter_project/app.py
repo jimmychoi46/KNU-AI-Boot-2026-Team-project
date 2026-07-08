@@ -21,6 +21,7 @@ st.subheader("사용 방법")
 st.markdown(
     """
     - **subscribe**: 일반 사용자가 뉴스레터를 구독하는 페이지
+    - **user_dashboard**: 일반 사용자가 본인 구독 정보를 수정하는 페이지
     - **unsubscribe**: 일반 사용자가 본인 이메일로 구독을 취소하는 페이지
     - **dashboard**: 관리자만 접근 가능한 페이지
     """

@@ -4,7 +4,10 @@ from utils import (
     get_statistics,
     delete_subscriber,
     update_subscriber,
-    generate_time_options
+    generate_time_options,
+    FREQUENCY_OPTIONS,
+    SUMMARY_LENGTH_OPTIONS,
+    LANGUAGE_OPTIONS,
 )
 
 st.title("🔐 관리자 대시보드")
@@ -17,12 +20,10 @@ if admin_password != st.secrets["admin_password"]:
 
 st.success("관리자 인증 완료")
 
-# 백엔드(GET /subscribers)도 같은 비밀번호를 X-Admin-Password 헤더로 요구한다.
-# .env의 ADMIN_PASSWORD와 이 앱의 secrets.toml의 admin_password가 같은 값이어야 한다.
 df, error = load_subscribers(admin_password)
 
 if error:
-    st.error(f"구독자 목록을 불러오지 못했습니다: {error}")
+    st.error(error)
     st.stop()
 
 stats = get_statistics(df)
@@ -51,9 +52,6 @@ else:
     selected_row = df[df["email"] == selected_email_for_edit].iloc[0]
 
     send_time_options = generate_time_options()
-    frequency_options = ["매일", "주 3회", "매주"]
-    summary_length_options = ["짧게", "중간", "길게"]
-    language_options = ["한국어", "영어"]
 
     edit_name = st.text_input("이름 수정", value=selected_row["name"])
     edit_email = st.text_input("이메일 수정", value=selected_row["email"])
@@ -69,32 +67,32 @@ else:
     )
 
     current_frequency = str(selected_row["frequency"])
-    frequency_index = frequency_options.index(current_frequency) if current_frequency in frequency_options else 0
+    frequency_index = FREQUENCY_OPTIONS.index(current_frequency) if current_frequency in FREQUENCY_OPTIONS else 0
 
     edit_frequency = st.selectbox(
         "발송 주기 수정",
-        frequency_options,
+        FREQUENCY_OPTIONS,
         index=frequency_index
     )
 
     current_summary_length = str(selected_row["summary_length"])
     summary_length_index = (
-        summary_length_options.index(current_summary_length)
-        if current_summary_length in summary_length_options else 0
+        SUMMARY_LENGTH_OPTIONS.index(current_summary_length)
+        if current_summary_length in SUMMARY_LENGTH_OPTIONS else 0
     )
 
     edit_summary_length = st.selectbox(
         "요약 길이 수정",
-        summary_length_options,
+        SUMMARY_LENGTH_OPTIONS,
         index=summary_length_index
     )
 
     current_language = str(selected_row["language"])
-    language_index = language_options.index(current_language) if current_language in language_options else 0
+    language_index = LANGUAGE_OPTIONS.index(current_language) if current_language in LANGUAGE_OPTIONS else 0
 
     edit_language = st.selectbox(
         "언어 수정",
-        language_options,
+        LANGUAGE_OPTIONS,
         index=language_index
     )
 
@@ -102,7 +100,7 @@ else:
         if not edit_name or not edit_email or not edit_keywords:
             st.warning("이름, 이메일, 관심 키워드를 모두 입력해 주세요.")
         else:
-            success, message = update_subscriber(
+            success, error = update_subscriber(
                 old_email=selected_email_for_edit,
                 name=edit_name,
                 new_email=edit_email,
@@ -114,10 +112,10 @@ else:
             )
 
             if success:
-                st.success(message or "구독자 정보가 수정되었습니다.")
+                st.success("구독자 정보가 수정되었습니다.")
                 st.rerun()
             else:
-                st.error(message or "수정에 실패했습니다.")
+                st.error(error or "수정에 실패했습니다.")
 
     st.subheader("구독자 삭제")
 
@@ -128,10 +126,10 @@ else:
     )
 
     if st.button("선택한 구독자 삭제"):
-        success, message = delete_subscriber(selected_email_for_delete)
+        success = delete_subscriber(selected_email_for_delete)
 
         if success:
             st.success(f"{selected_email_for_delete} 구독 정보가 삭제되었습니다.")
             st.rerun()
         else:
-            st.error(message or "삭제에 실패했습니다.")
+            st.error("삭제에 실패했습니다.")

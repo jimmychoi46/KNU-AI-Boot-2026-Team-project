@@ -11,9 +11,9 @@ if st.button("구독 취소"):
     if not email:
         st.warning("이메일을 입력해 주세요.")
     else:
-        success, message = unsubscribe_subscriber(email)
+        success = unsubscribe_subscriber(email)
 
         if success:
             st.success(f"{email} 구독이 취소되었습니다.")
         else:
-            st.error(message or "해당 이메일의 구독 정보를 찾을 수 없습니다.")
+            st.error("해당 이메일의 구독 정보를 찾을 수 없습니다.")
