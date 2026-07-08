@@ -3,12 +3,21 @@
 *.pem
 *.key
 
+# 구독자 데이터 (이메일 등 개인정보 — 예시 파일만 커밋)
+data/subscriptions.json
+
+# 뉴스/요약 저장용 SQLite DB (수집·요약 결과 — 런타임 생성물)
+data/newsletter.db
+data/*.db-journal
+data/*.db-wal
+
 __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
 venv/
 env/
+legacy/
 
 .ipynb_checkpoints/
 

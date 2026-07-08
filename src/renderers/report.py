@@ -1,30 +1,58 @@
 """메일 본문 렌더링 인터페이스.
 
-담당: D (기획/데이터) — 템플릿 디자인·가독성.
-백엔드(B)는 render() 를 호출해 최종 HTML 을 받는다.
-실제 템플릿/디자인(templates/daily_report.html 등)은 D 가 담당한다.
+담당: 기획/데이터 — 템플릿 디자인·가독성.
+백엔드는 render() 를 호출해 최종 HTML 을 받는다.
+실제 템플릿/디자인(templates/daily_report.html 등)은 기획/데이터 담당이 맡는다.
+
+[보안] 뉴스 제목/링크는 외부(공격자)가 조작 가능한 입력이므로,
+HTML 로 합성할 때 반드시 이스케이프하고 링크 스킴을 검증한다(HTML 인젝션 방어).
 """
+import html
+from urllib.parse import urlparse
 
 
-def render(summarized):
-    """요약 결과를 메일 HTML 본문으로 렌더링한다.
+def _safe_href(url):
+    """http/https 링크만 허용. 그 외(javascript:, data: 등)는 '#' 로 대체."""
+    try:
+        scheme = urlparse(url).scheme.lower()
+    except ValueError:
+        return "#"
+    return url if scheme in ("http", "https") else "#"
 
-    [인터페이스 계약] — D 가 구현할 때 아래 입출력 형태를 지켜주세요.
+
+def render(digests):
+    """다이제스트(이슈→주제→기사 계층)를 메일 HTML 본문으로 렌더링한다.
+
+    [인터페이스 계약] — 구현 시 아래 입출력 형태를 지켜주세요.
         args:
-            summarized(dict): summarizer.summarize() 의 반환값
-                {query(str): [{"headline", "summary", "link"}, ...]}
+            digests(dict): {query(str): [issue, ...]}
+                issue: {"headline": str, "topics": [topic, ...]}
+                topic: {"topic": str, "topic_summary": str, "links": [str, ...]}
+                (하나의 query 에 issue 가 여러 개, 하나의 issue 에 topic 이 1~3개,
+                 하나의 topic 에 관련 기사 link 가 여러 개 있을 수 있다)
         returns:
             str: 완성된 HTML 본문
 
-    ※ 아래는 D 구현 전 임시 스텁이다. 실제 디자인/템플릿은 D 가 담당.
+    ※ 아래는 구현 전 임시 스텁이다. 실제 디자인/템플릿은 기획/데이터 담당이 맡는다.
+      단, 이스케이프/링크 검증은 디자인을 바꿔도 반드시 유지할 것(각 link 마다 적용).
     """
-    # TODO(D): templates/daily_report.html 기반 실제 디자인으로 교체
+    # TODO(기획/데이터): templates/daily_report.html 기반 실제 디자인으로 교체
     blocks = ["<html><body style=\"font-family: sans-serif;\">"]
     blocks.append("<h2>오늘의 금융 뉴스 브리핑</h2>")
-    for query, rows in summarized.items():
-        blocks.append(f"<h3>{query}</h3><ul>")
-        for row in rows:
-            blocks.append(f'<li><a href="{row["link"]}">{row["headline"]}</a></li>')
-        blocks.append("</ul>")
+    for query, issues in digests.items():
+        blocks.append(f"<h3>{html.escape(query)}</h3>")
+        for issue in issues:
+            blocks.append(f"<h4>{html.escape(issue.get('headline', ''))}</h4><ul>")
+            for topic in issue.get("topics", []):
+                summary = html.escape(topic.get("topic_summary", ""))
+                links_html = " ".join(
+                    f'<a href="{html.escape(_safe_href(link), quote=True)}">[기사]</a>'
+                    for link in topic.get("links", [])
+                )
+                blocks.append(
+                    f"<li><strong>{html.escape(topic.get('topic', ''))}</strong> "
+                    f"{summary} {links_html}</li>"
+                )
+            blocks.append("</ul>")
     blocks.append("</body></html>")
     return "\n".join(blocks)

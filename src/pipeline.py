@@ -1,36 +1,182 @@
 """파이프라인 조립.
 
-담당: B (백엔드).
-수집(B) → 요약·편집(A) → 렌더링(D) → 발송(B) 순서로 엮어 1회 실행한다.
-A / D 파트는 인터페이스만 호출하며, 각 모듈 내부 구현은 담당자가 채운다.
+담당: 백엔드.
+
+[정기 발송 — 3개 배치 잡으로 분리]
+전체 흐름을 한 번에 돌리는 대신, DB(src/db.py)를 사이에 두고 세 단계로 나눈다.
+각 잡은 독립적으로(서로 다른 주기로) 돌 수 있고, 단계 결과는 DB로 넘긴다.
+  ① collect_job   : 수집(백엔드) → 정제 → DB(articles) 저장
+  ② summarize_job : DB(articles) 조회 → 요약·편집(LLM/Agent, 이슈→주제 단위) → DB(digests) 저장
+  ③ dispatch_job  : DB(digests) 조회 → 렌더링(기획/데이터) → 이메일 발송(백엔드)
+
+[속보 발송] send_breaking_alert 는 시간과 무관한 즉시 발송이라 DB 를 거치지 않고
+정기 흐름과 동일한 요약·렌더링 파이프라인을 그때그때 동기적으로 재사용한다.
+
+LLM/Agent · 기획/데이터 파트는 인터페이스만 호출하며, 각 모듈 내부 구현은 담당자가 채운다.
 """
-from src import config
-from src.collectors import naver_news    # 담당 B
-from src.processors import summarizer     # 담당 A (요약·편집)
-from src.renderers import report          # 담당 D (템플릿·렌더링)
-from src.notifiers import send_email      # 담당 B
+from datetime import datetime
+
+import pytz
+
+from src import config, db
+from src.collectors import naver_news    # 백엔드
+from src.processors import summarizer     # LLM/Agent (요약·편집)
+from src.renderers import report          # 기획/데이터 (템플릿·렌더링)
+from src.notifiers import send_email      # 백엔드
+from src.subscriptions import due_subscribers, load_subscriptions, send_window_hours
 
 
-def run_pipeline():
-    """뉴스 수집 → 요약 → 렌더링 → 발송까지 한 번 실행한다 (스케줄러가 호출)."""
-    # 1. 수집 (B)
-    collected = naver_news.collect(config.SEARCH_QUERIES, config.NEWS_DISPLAY)
+def run_for_subscriber(sub):
+    """구독자 sub 의 키워드로 뉴스를 만들어 그의 메일로 발송한다.
 
-    # 2. 요약·편집 (A 인터페이스)
-    summarized = summarizer.summarize(collected)
+    args:
+        sub(Subscription): email / keywords / send_hour / send_minute
+    """
+    # 0. 보낼 게 있는지 먼저 확인 — 빈 메일 발송 방지
+    if not sub.keywords:
+        print(f"[발송 건너뜀] {sub.email}: 선택된 키워드 없음")
+        return
 
-    # 3. 렌더링 (D 인터페이스)
-    body_html = report.render(summarized)
+    # 1. 수집 (백엔드) — 구독자가 고른 키워드로만
+    collected = naver_news.collect(sub.keywords, config.NEWS_DISPLAY)
+    if not any(collected.values()):
+        print(f"[발송 건너뜀] {sub.email}: 최근 뉴스 없음")
+        return
 
-    # 4. 발송 (B)
-    send_email.send_to_recipients(
-        config.EMAIL_RECIPIENTS,
+    # 2. 요약·편집 (LLM/Agent 인터페이스) — 구독자가 고른 길이/언어로.
+    #    summarizer 는 평평한(flat) 행을 주므로, 렌더러에 넘기기 전에 이슈→주제 계층으로 묶는다
+    #    (DB 경유 발송과 동일한 규칙 — db.group_digest_rows 를 공유해서 일관성 유지).
+    flat = summarizer.summarize(collected, sub.summary_length, sub.language)
+    digests = {kw: db.group_digest_rows(rows) for kw, rows in flat.items() if rows}
+
+    # 3. 렌더링 (기획/데이터 인터페이스)
+    body_html = report.render(digests)
+
+    # 4. 발송 (백엔드)
+    send_email.send_email(
+        sub.email,
+        subject=f"[데일리] 오늘의 {sub.keywords} 뉴스 브리핑",
+        body_html=body_html,
+    )
+    print(f"[발송 완료] {sub.email} ({sub.send_hour:02d}:{sub.send_minute:02d})")
+
+
+def send_breaking_alert(sub, event):
+    """감지된 속보 event 를 구독자 sub 에게 시간과 무관하게 긴급 발송한다.
+
+    정기 발송과 동일한 요약·렌더링 파이프라인을 재사용하되, 제목만 [긴급]으로 구분한다.
+    args:
+        sub(Subscription): 수신자
+        event(dict): breaking.detect() 가 만든 이벤트 (keyword/items/... 포함)
+    """
+    flat = summarizer.summarize({event["keyword"]: event["items"]}, sub.summary_length, sub.language)
+    digests = {kw: db.group_digest_rows(rows) for kw, rows in flat.items() if rows}
+    body_html = report.render(digests)
+    send_email.send_email(
+        sub.email,
+        subject=f"[긴급] {event['keyword']} 속보",
+        body_html=body_html,
+    )
+    print(f"[긴급 발송] {sub.email} ← {event['keyword']} (x{event['factor']})")
+
+
+# ─────────────────────────────────────────────────────────────
+# 정기 발송 배치 잡 (DB 를 사이에 둔 3단계)
+# ─────────────────────────────────────────────────────────────
+
+def collect_job(now=None):
+    """① 수집 잡 — 전체 구독자가 고른 키워드의 뉴스를 수집·정제해 DB(articles)에 저장.
+
+    구독자별로 따로 수집하지 않고, 모든 구독자의 키워드를 합쳐(중복 제거) 한 번에 수집한다
+    (같은 키워드를 여러 구독자가 골라도 API 호출·저장은 1회).
+    returns: 새로 저장된 기사 수.
+    """
+    subs = load_subscriptions()
+    keywords = sorted({kw for s in subs for kw in s.keywords})
+    if not keywords:
+        print("[수집 잡] 대상 키워드 없음")
+        return 0
+    collected = naver_news.collect(keywords, config.NEWS_DISPLAY, now=now)
+    saved = db.save_articles(collected, now=now)
+    print(f"[수집 잡] 키워드 {len(keywords)}개 → 신규 기사 {saved}건 저장")
+    return saved
+
+
+def summarize_job(now=None):
+    """② 요약 잡 — 구독자가 실제 구독한 (키워드, 요약 길이, 언어) 조합마다 최근 기사를
+    모아 LLM에게 이슈→주제 단위로 요약시키고, 그 결과를 새 다이제스트로 저장.
+
+    기존 '기사 1건 = 요약 1건' 모델과 달리, LLM이 여러 기사를 묶어 이슈/주제로
+    재구성하므로 '아직 요약 안 된 기사'라는 개념이 없다. 매 실행마다 그 키워드에
+    보유 중인 기사 전체를 다시 넘겨 새 다이제스트 스냅샷을 만든다 — 오래된 스냅샷은
+    발송 시 창(window)으로 걸러진다(db.fetch_digests_for_keywords).
+    조합 수는 실제 구독 중인 (키워드, summary_length, language) 조합만큼 — 보통 적다.
+    returns: 새로 생성된 다이제스트 수.
+    """
+    triples = sorted({
+        (kw, s.summary_length, s.language)
+        for s in load_subscriptions() for kw in s.keywords
+    })
+    if not triples:
+        return 0
+
+    created = 0
+    for keyword, summary_length, language in triples:
+        articles = db.fetch_articles_for_keyword(keyword, now=now)
+        if not articles:
+            continue
+        collected = {keyword: articles}
+        summarized = summarizer.summarize(collected, summary_length, language)
+        digest_id = db.save_digest(keyword, summary_length, language,
+                                    summarized.get(keyword, []), now=now)
+        if digest_id is not None:
+            created += 1
+            print(f"[요약 잡] {keyword} ({summary_length}/{language}) → "
+                  f"다이제스트 #{digest_id} 생성 (기사 {len(articles)}건)")
+    return created
+
+
+def dispatch_job(now=None):
+    """③ 발송 잡 — 지금 발송할 구독자에게 DB의 최근 요약을 렌더링해 이메일 발송.
+
+    분 단위 디스패처로 돌리며, 매 실행마다 구독 저장소를 새로 읽어 대시보드 변경을 즉시 반영한다.
+    """
+    now = now or datetime.now(pytz.timezone(config.TIMEZONE))
+    subs = load_subscriptions()
+    due = due_subscribers(subs, now)
+    if not due:
+        return
+    print(f"[{now:%H:%M}] 발송 잡 대상 {len(due)}명")
+    for sub in due:
+        try:
+            dispatch_one(sub, now=now)
+        except Exception as exc:  # 한 명 실패가 나머지 발송을 막지 않도록 격리
+            print(f"[발송 실패] {sub.email}: {exc}")
+
+
+def dispatch_one(sub, now=None):
+    """구독자 한 명에게 DB의 최신 다이제스트를 렌더링해 발송한다.
+
+    되돌아보는 창(window)은 구독자 주기(frequency)에 따라 다르다
+    — 지난 발송 이후 소식을 커버하도록 send_window_hours 로 정한다.
+    다이제스트는 구독자가 고른 summary_length/language 조합으로 생성된 것만 가져온다.
+    args:
+        sub(Subscription): 수신자 (email / keywords / send_hour / send_minute / frequency
+                            / summary_length / language)
+    """
+    if now is None:
+        now = datetime.now(pytz.timezone(config.TIMEZONE))
+    hours = send_window_hours(sub, now)
+    digests = db.fetch_digests_for_keywords(
+        sub.keywords, sub.summary_length, sub.language, now=now, hours=hours
+    )
+    if not digests:
+        print(f"[발송 건너뜀] {sub.email}: 최근 다이제스트 없음")
+        return
+    body_html = report.render(digests)
+    send_email.send_email(
+        sub.email,
         subject="[데일리] 오늘의 금융 뉴스 브리핑",
         body_html=body_html,
     )
-    print("파이프라인 실행 완료")
-
-
-if __name__ == "__main__":
-    # 스케줄러 없이 파이프라인만 즉시 1회 실행하고 싶을 때 사용
-    run_pipeline()
+    print(f"[발송 완료] {sub.email} ({sub.send_hour:02d}:{sub.send_minute:02d})")

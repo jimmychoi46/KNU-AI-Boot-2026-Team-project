@@ -3,5 +3,8 @@ python-dotenv==1.2.2
 pytz==2026.2
 requests==2.34.2
 
-# (선택) LLM 요약 연동 시 주석 해제
-# anthropic
+# 구독자 REST API (Swagger 자동 생성: /docs)
+fastapi==0.139.0
+uvicorn==0.50.2
+httpx==0.28.1          # 테스트(FastAPI TestClient)용
+
