@@ -126,3 +126,27 @@ def update_subscriber(old_email, name, new_email, keywords, send_time, frequency
 
     df.to_csv(FILE_PATH, index=False)
     return True
+
+def get_subscriber_by_email(email):
+    """
+    이메일을 기준으로 특정 구독자 1명의 정보를 가져오는 함수
+
+    매개변수:
+        email (str): 찾고 싶은 구독자의 이메일
+
+    반환값:
+        pandas.Series 또는 None
+        - 찾으면 해당 행(row) 반환
+        - 없으면 None 반환
+    """
+    df = load_subscribers()
+
+    if df.empty:
+        return None
+
+    matched_rows = df[df["email"] == email]
+
+    if matched_rows.empty:
+        return None
+
+    return matched_rows.iloc[0]
