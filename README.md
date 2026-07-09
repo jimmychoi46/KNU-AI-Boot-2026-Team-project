@@ -12,7 +12,7 @@
 | 파일 | 역할 |
 |---|---|
 | `LLM_fn.py` | 요약 Agent, 편집/QA Agent, 링크 무결성 검증 등 핵심 로직 |
-| `summarize_interface.py` | 백엔드와 합의한 `summarize()` 인터페이스 (실제 연동 지점) |
+| `temporary.py` | 백엔드와 합의한 `summarize()` 인터페이스 (실제 연동 지점) |
 | `test_summarize.py` | `summarize()` 동작 확인용 테스트 스크립트 |
 | `collected_sample.json` | 테스트용 샘플 입력 데이터 |
 
