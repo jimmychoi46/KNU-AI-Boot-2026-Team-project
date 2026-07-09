@@ -1,12 +1,3 @@
-"""메일 본문 렌더링 인터페이스.
-
-담당: 기획/데이터 — 템플릿 디자인·가독성.
-백엔드는 render() 를 호출해 최종 HTML 을 받는다.
-실제 템플릿/디자인(templates/daily_report.html 등)은 기획/데이터 담당이 맡는다.
-
-[보안] 뉴스 제목/링크는 외부(공격자)가 조작 가능한 입력이므로,
-HTML 로 합성할 때 반드시 이스케이프하고 링크 스킴을 검증한다(HTML 인젝션 방어).
-"""
 import html
 from urllib.parse import urlparse
 

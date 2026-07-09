@@ -28,8 +28,8 @@ MON, TUE, WED, FRI = (datetime(2026, 1, d, 8, 0) for d in (5, 6, 7, 9))
 
 
 class TestDueSubscribers(unittest.TestCase):
-    def _sub(self, email, hour, minute, frequency="매일"):
-        return Subscription(email, ["주식"], hour, minute, frequency=frequency)
+    def _sub(self, email, hour, minute, frequency="매일", confirmed=True):
+        return Subscription(email, ["주식"], hour, minute, frequency=frequency, confirmed=confirmed)
 
     def test_matches_time(self):
         subs = [self._sub("a@x.com", 8, 0), self._sub("b@x.com", 18, 30)]
@@ -51,6 +51,11 @@ class TestDueSubscribers(unittest.TestCase):
         self.assertFalse(due_subscribers([sub], TUE))
         self.assertTrue(due_subscribers([sub], WED))
         self.assertTrue(due_subscribers([sub], FRI))
+
+    def test_unconfirmed_is_never_due(self):
+        # 이메일 미확인(confirmed=False) 구독자는 시:분/요일이 맞아도 절대 발송 대상이 아니다
+        sub = self._sub("u@x.com", 8, 0, confirmed=False)
+        self.assertEqual(due_subscribers([sub], TUE), [])
 
 
 class TestSendWindow(unittest.TestCase):
@@ -141,13 +146,16 @@ class TestFromRow(unittest.TestCase):
                          "frequency": "존재하지않는주기"})
         self.assertEqual(sub.frequency, "매일")
 
-    def test_send_time_preset_is_converted(self):
-        sub = _from_row({"email": "a@x.com", "keywords": ["주식"], "send_time": "정오(12시)"})
-        self.assertEqual((sub.send_hour, sub.send_minute), (12, 0))
-
-    def test_unknown_send_time_preset_raises(self):
+    def test_missing_send_hour_or_minute_raises(self):
+        # send_time 프리셋 호환 코드는 제거됐다 — send_hour/send_minute 가 반드시 있어야 한다
         with self.assertRaises(ValueError):
-            _from_row({"email": "a@x.com", "keywords": ["주식"], "send_time": "새벽 3시"})
+            _from_row({"email": "a@x.com", "keywords": ["주식"], "send_hour": 8})
+        with self.assertRaises(ValueError):
+            _from_row({"email": "a@x.com", "keywords": ["주식"], "send_minute": 0})
+
+    def test_new_subscriber_defaults_unconfirmed(self):
+        sub = _from_row({"email": "a@x.com", "keywords": ["주식"], "send_hour": 8, "send_minute": 0})
+        self.assertFalse(sub.confirmed)
 
 
 class TestDbStore(unittest.TestCase):
@@ -176,6 +184,7 @@ class TestDbStore(unittest.TestCase):
         self.assertEqual(subs[0].email, "a@x.com")
         self.assertEqual(subs[0].name, "홍길동")
         self.assertEqual(subs[0].keywords, ["주식", "금리"])
+        self.assertFalse(subs[0].confirmed)  # 신규 가입은 이메일 확인 전까지 미확인
 
     def test_upsert_same_email_updates_not_duplicates(self):
         save_subscription(self._record(send_hour=8), path=self.path)
@@ -214,7 +223,66 @@ class TestDbStore(unittest.TestCase):
 
         imported = import_from_json(json_path=f.name, db_path=self.path)
         self.assertEqual(imported, 1)  # 정상 1건만
-        self.assertEqual([s.email for s in load_subscriptions(self.path)], ["a@x.com"])
+        subs = load_subscriptions(self.path)
+        self.assertEqual([s.email for s in subs], ["a@x.com"])
+        self.assertTrue(subs[0].confirmed)  # 기존 JSON 구독자는 확인 절차 없이 이관(grandfather)
+
+
+class TestEmailConfirmation(unittest.TestCase):
+    """더블 옵트인 — 확인 토큰 발급/확인/재전송 흐름."""
+
+    def setUp(self):
+        fd, self.path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        os.remove(self.path)
+        db.init_db(self.path)
+        self.addCleanup(lambda: os.path.exists(self.path) and os.remove(self.path))
+
+    def _record(self, email="a@x.com", **over):
+        rec = {"email": email, "keywords": ["주식"], "send_hour": 8, "send_minute": 0}
+        rec.update(over)
+        return rec
+
+    def test_new_subscriber_gets_a_token(self):
+        save_subscription(self._record(), path=self.path)
+        token = db.fetch_confirm_token("a@x.com", path=self.path)
+        self.assertIsNotNone(token)
+
+    def test_confirm_with_valid_token_marks_confirmed(self):
+        save_subscription(self._record(), path=self.path)
+        token = db.fetch_confirm_token("a@x.com", path=self.path)
+        confirmed_email = db.confirm_subscriber(token, path=self.path)
+        self.assertEqual(confirmed_email, "a@x.com")
+        subs = load_subscriptions(self.path)
+        self.assertTrue(subs[0].confirmed)
+
+    def test_confirm_token_is_single_use(self):
+        save_subscription(self._record(), path=self.path)
+        token = db.fetch_confirm_token("a@x.com", path=self.path)
+        db.confirm_subscriber(token, path=self.path)
+        # 같은 토큰을 다시 쓰면 더 이상 유효하지 않다(폐기됨)
+        self.assertIsNone(db.confirm_subscriber(token, path=self.path))
+
+    def test_confirm_with_invalid_token_returns_none(self):
+        self.assertIsNone(db.confirm_subscriber("not-a-real-token", path=self.path))
+
+    def test_updating_existing_subscriber_preserves_confirmation(self):
+        # PUT(정보 수정)은 이미 확인된 구독자의 confirmed 상태를 되돌리지 않는다
+        save_subscription(self._record(), path=self.path)
+        token = db.fetch_confirm_token("a@x.com", path=self.path)
+        db.confirm_subscriber(token, path=self.path)
+        save_subscription(self._record(send_hour=18), path=self.path)  # 같은 이메일 재저장
+        subs = load_subscriptions(self.path)
+        self.assertTrue(subs[0].confirmed)
+        self.assertEqual(subs[0].send_hour, 18)
+
+    def test_resend_reuses_existing_token_while_unconfirmed(self):
+        # 미확인 상태에서 재신청(재전송)해도 토큰이 바뀌지 않는다(이미 있는 토큰 재사용)
+        save_subscription(self._record(), path=self.path)
+        token1 = db.fetch_confirm_token("a@x.com", path=self.path)
+        save_subscription(self._record(name="다시 신청"), path=self.path)
+        token2 = db.fetch_confirm_token("a@x.com", path=self.path)
+        self.assertEqual(token1, token2)
 
 
 if __name__ == "__main__":

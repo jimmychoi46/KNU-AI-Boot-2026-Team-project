@@ -62,6 +62,31 @@ class TestDb(unittest.TestCase):
     def test_fetch_articles_for_keyword_empty_when_none(self):
         self.assertEqual(db.fetch_articles_for_keyword("주식", now=self.now, path=self.path), [])
 
+    # ── prune_old_articles ──────────────────────────────────────
+    def test_prune_old_articles_deletes_only_stale_rows(self):
+        db.save_articles({
+            "주식": [self._article(link="http://a/fresh", hours_ago=1),
+                     self._article(link="http://a/stale", hours_ago=200)],
+        }, now=self.now, path=self.path)
+        deleted = db.prune_old_articles(now=self.now, hours=24, path=self.path)
+        self.assertEqual(deleted, 1)
+        remaining = db.fetch_articles_for_keyword("주식", now=self.now, hours=999, path=self.path)
+        self.assertEqual([a["link"] for a in remaining], ["http://a/fresh"])
+
+    def test_prune_old_articles_default_hours_is_recency_hours(self):
+        # hours 미지정 시 config.RECENCY_HOURS(7일) 기준 — 그보다 살짝 안 지난 기사는 남는다
+        db.save_articles({
+            "주식": [self._article(link="http://a/just_inside", hours_ago=167),
+                     self._article(link="http://a/just_outside", hours_ago=169)],
+        }, now=self.now, path=self.path)
+        db.prune_old_articles(now=self.now, path=self.path)
+        remaining = db.fetch_articles_for_keyword("주식", now=self.now, hours=999, path=self.path)
+        self.assertEqual([a["link"] for a in remaining], ["http://a/just_inside"])
+
+    def test_prune_old_articles_returns_zero_when_nothing_stale(self):
+        db.save_articles({"주식": [self._article(hours_ago=1)]}, now=self.now, path=self.path)
+        self.assertEqual(db.prune_old_articles(now=self.now, hours=24, path=self.path), 0)
+
     # ── group_digest_rows (순수 함수, DB 없음) ───────────────────
     def test_group_digest_rows_builds_issue_topic_link_hierarchy(self):
         rows = [

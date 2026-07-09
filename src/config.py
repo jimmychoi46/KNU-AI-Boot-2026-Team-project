@@ -1,10 +1,3 @@
-"""환경 변수 불러오기 & 상수 정의
-
-1. .env 파일의 값(환경 변수)을 읽어 변수에 저장, 각 모듈에서 공통으로 사용하도록 한다.
-2. 시스템 동작에 필요한 '고정' 상수(선택 가능한 키워드 후보, 시간대 등)만 관리한다.
-   - 사용자가 고르는 값(개인 키워드/발송 시간)은 상수가 아니라 '구독' 데이터로 관리한다.
-     → data/subscriptions.json (프론트의 대시보드가 생성/수정, src/subscriptions.py 로 로드)
-"""
 import os
 
 from dotenv import load_dotenv
@@ -25,6 +18,9 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
 
 # 2-2. api.py 가 이메일 확인(더블 옵트인) 링크를 만들 때 쓰는 이 서비스의 외부 주소.
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
+
+# 2-3. 셀프서비스(본인 조회/수정/구독취소) 전 본인 확인 코드의 유효 시간(분).
+ACCESS_CODE_TTL_MINUTES = int(os.getenv("ACCESS_CODE_TTL_MINUTES", "15"))
 
 
 # 3. 고정 상수 정의

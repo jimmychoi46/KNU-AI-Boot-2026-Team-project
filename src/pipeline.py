@@ -1,19 +1,3 @@
-"""파이프라인 조립.
-
-담당: 백엔드.
-
-[정기 발송 — 3개 배치 잡으로 분리]
-전체 흐름을 한 번에 돌리는 대신, DB(src/db.py)를 사이에 두고 세 단계로 나눈다.
-각 잡은 독립적으로(서로 다른 주기로) 돌 수 있고, 단계 결과는 DB로 넘긴다.
-  ① collect_job   : 수집(백엔드) → 정제 → DB(articles) 저장
-  ② summarize_job : DB(articles) 조회 → 요약·편집(LLM/Agent, 이슈→주제 단위) → DB(digests) 저장
-  ③ dispatch_job  : DB(digests) 조회 → 렌더링(기획/데이터) → 이메일 발송(백엔드)
-
-[속보 발송] send_breaking_alert 는 시간과 무관한 즉시 발송이라 DB 를 거치지 않고
-정기 흐름과 동일한 요약·렌더링 파이프라인을 그때그때 동기적으로 재사용한다.
-
-LLM/Agent · 기획/데이터 파트는 인터페이스만 호출하며, 각 모듈 내부 구현은 담당자가 채운다.
-"""
 from datetime import datetime
 
 import pytz
@@ -32,7 +16,10 @@ def run_for_subscriber(sub):
     args:
         sub(Subscription): email / keywords / send_hour / send_minute
     """
-    # 0. 보낼 게 있는지 먼저 확인 — 빈 메일 발송 방지
+    # 0. 보낼 게 있는지 먼저 확인 — 빈 메일 발송 방지 + 이메일 미확인자는 발송 금지
+    if not sub.confirmed:
+        print(f"[발송 건너뜀] {sub.email}: 이메일 미확인")
+        return
     if not sub.keywords:
         print(f"[발송 건너뜀] {sub.email}: 선택된 키워드 없음")
         return
@@ -69,6 +56,9 @@ def send_breaking_alert(sub, event):
         sub(Subscription): 수신자
         event(dict): breaking.detect() 가 만든 이벤트 (keyword/items/... 포함)
     """
+    if not sub.confirmed:
+        print(f"[긴급 발송 건너뜀] {sub.email}: 이메일 미확인")
+        return
     flat = summarizer.summarize({event["keyword"]: event["items"]}, sub.summary_length, sub.language)
     digests = {kw: db.group_digest_rows(rows) for kw, rows in flat.items() if rows}
     body_html = report.render(digests)
@@ -89,16 +79,20 @@ def collect_job(now=None):
 
     구독자별로 따로 수집하지 않고, 모든 구독자의 키워드를 합쳐(중복 제거) 한 번에 수집한다
     (같은 키워드를 여러 구독자가 골라도 API 호출·저장은 1회).
+    이메일 미확인 구독자는 제외한다 — 확인 전 주소를 위해 API 호출·저장을 낭비하지 않는다.
+    저장 직후 RECENCY_HOURS 보다 오래된 기사를 정리한다 — articles 가 무한히 쌓이지
+    않도록(digests 가 조합당 최신 1건만 남기는 것과 같은 이유의 자체 정리).
     returns: 새로 저장된 기사 수.
     """
-    subs = load_subscriptions()
+    subs = [s for s in load_subscriptions() if s.confirmed]
     keywords = sorted({kw for s in subs for kw in s.keywords})
     if not keywords:
         print("[수집 잡] 대상 키워드 없음")
         return 0
     collected = naver_news.collect(keywords, config.NEWS_DISPLAY, now=now)
     saved = db.save_articles(collected, now=now)
-    print(f"[수집 잡] 키워드 {len(keywords)}개 → 신규 기사 {saved}건 저장")
+    pruned = db.prune_old_articles(now=now)
+    print(f"[수집 잡] 키워드 {len(keywords)}개 → 신규 기사 {saved}건 저장, 오래된 기사 {pruned}건 정리")
     return saved
 
 
@@ -111,11 +105,12 @@ def summarize_job(now=None):
     보유 중인 기사 전체를 다시 넘겨 새 다이제스트 스냅샷을 만든다 — 오래된 스냅샷은
     발송 시 창(window)으로 걸러진다(db.fetch_digests_for_keywords).
     조합 수는 실제 구독 중인 (키워드, summary_length, language) 조합만큼 — 보통 적다.
+    이메일 미확인 구독자는 제외한다.
     returns: 새로 생성된 다이제스트 수.
     """
     triples = sorted({
         (kw, s.summary_length, s.language)
-        for s in load_subscriptions() for kw in s.keywords
+        for s in load_subscriptions() if s.confirmed for kw in s.keywords
     })
     if not triples:
         return 0
@@ -126,7 +121,11 @@ def summarize_job(now=None):
         if not articles:
             continue
         collected = {keyword: articles}
-        summarized = summarizer.summarize(collected, summary_length, language)
+        try:
+            summarized = summarizer.summarize(collected, summary_length, language)
+        except Exception as exc:  # 한 조합의 LLM 실패가 나머지 조합 요약을 막지 않도록 격리
+            print(f"[요약 실패] {keyword} ({summary_length}/{language}): {exc}")
+            continue
         digest_id = db.save_digest(keyword, summary_length, language,
                                     summarized.get(keyword, []), now=now)
         if digest_id is not None:

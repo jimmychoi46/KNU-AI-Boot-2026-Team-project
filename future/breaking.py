@@ -1,14 +1,3 @@
-"""속보(breaking-news) 감지.
-
-담당: 백엔드 — 시간이 아니라 '이벤트'로 트리거되는 긴급 발송의 감지 로직.
-
-결합 규칙:
-    발송 = (A: 긴급 키워드) AND (B: 물량 급증)   또는   (강한 B 단독)
-    - A 단독(급증 없음)은 현재 보류/버림 (LLM 확인은 추후 협의)
-
-상태(급증 기준선·발송 이력·쿨다운)는 프로세스 인메모리라 재시작 시 리셋된다.
-→ 배포 시 파일/DB 로 옮길 것 (TODO).
-"""
 import re
 from collections import defaultdict, deque
 from datetime import datetime, timedelta

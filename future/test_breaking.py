@@ -5,7 +5,8 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from src import breaking, config
+from future import breaking
+from src import config
 
 KST = timezone(timedelta(hours=9))
 

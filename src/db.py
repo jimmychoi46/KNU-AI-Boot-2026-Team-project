@@ -1,43 +1,4 @@
-"""뉴스/요약 저장소 (SQLite).
-
-담당: 백엔드 — 수집·요약·발송 배치 잡이 공유하는 데이터 저장소.
-
-파이프라인이 세 배치 잡으로 분리되면서, 각 잡은 메모리로 값을 주고받는 대신
-이 DB 를 통해 단계 결과를 넘긴다.
-  ① 수집 잡: 정제한 뉴스를 articles 에 저장                     (save_articles)
-  ② 요약 잡: 구독자가 실제 구독한 (키워드, summary_length, language) 조합마다
-             최근 기사를 모아 LLM 에게 이슈→주제 단위로 요약시키고,
-             그 결과를 새 다이제스트 스냅샷으로 저장
-             (fetch_articles_for_keyword → summarizer.summarize → save_digest)
-  ③ 발송 잡: 구독자 키워드 + 그 구독자의 (summary_length, language) 에 맞는
-             '최신' 다이제스트를 조회 → 렌더링 → 발송
-             (fetch_digests_for_keywords)
-
-LLM 은 여러 기사를 묶어 "핵심 이슈(headline) → 하위 주제(topic) 1~3개 → 주제별 요약
-+ 관련 기사(복수)" 구조로 편집한다. 한 키워드에 이슈가 여러 개 나올 수도, 한 주제에
-관련 기사가 여러 건 달릴 수도 있다. summarizer 는 이를 평평한(flat) 행 리스트
-[{"headline","topic","topic_summary","link"}, ...] 로 반환하고, group_digest_rows() 가
-이를 이슈→주제→링크 계층으로 묶는다(같은 기사 1건=요약 1건이던 구모델과 다름 — 이제
-"아직 요약 안 된 기사"라는 개념이 없고, 매 요약 잡 실행마다 보유 기사 전체를 다시 넘겨
-새 스냅샷을 만든다. 오래된 스냅샷은 발송 시 창(window)으로 걸러진다).
-
-[스키마]
-  subscribers   : 구독자 1명 (email=PK, name, keywords, send_hour/minute, frequency,
-                  summary_length, language, confirmed, confirm_token)
-                  프론트 대시보드가 여기에 쓰고, 백엔드가 읽는다(과거엔 JSON 파일이었음).
-                  confirmed 는 이메일 소유 확인(더블 옵트인) 여부 — confirmed=0 인
-                  구독자는 정기/속보 발송 대상에서 제외된다(subscriptions.is_due 등).
-                  confirm_token 은 확인 메일 링크에 실리는 1회용 토큰(확인 후 NULL).
-  articles      : 정제된 뉴스 1건 (keyword, title, link, description, published_at, collected_at)
-                  같은 키워드에서 같은 링크는 한 번만 저장 (UNIQUE(keyword, link))
-  digests       : (키워드, summary_length, language) 조합의 요약 생성 1회(스냅샷)
-  digest_issues : 다이제스트 안의 핵심 이슈(headline) — 다이제스트당 여러 개 가능
-  digest_topics : 이슈 아래 하위 주제(topic) + 주제별 요약(topic_summary) — 이슈당 1~3개
-  digest_links  : 주제에 딸린 관련 기사 링크 — 주제당 여러 개 가능
-
-데모(로컬 파일 하나)로도, 배포(파일 경로만 교체)로도 그대로 쓸 수 있게 표준
-라이브러리 sqlite3 만 사용한다. 별도 DB 서버가 필요하면 이 모듈만 교체하면 된다.
-"""
+import hmac
 import json
 import os
 import secrets
@@ -107,7 +68,12 @@ CREATE TABLE IF NOT EXISTS digest_links (
     FOREIGN KEY(topic_id) REFERENCES digest_topics(id) ON DELETE CASCADE
 );
 
+"""
+
+
+_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_articles_keyword ON articles(keyword);
+CREATE INDEX IF NOT EXISTS idx_articles_published_at ON articles(published_at);
 CREATE INDEX IF NOT EXISTS idx_digests_lookup ON digests(keyword, summary_length, language, created_at);
 CREATE INDEX IF NOT EXISTS idx_subscribers_confirm_token ON subscribers(confirm_token);
 """
@@ -129,12 +95,38 @@ def _connect(path=None):
     return conn
 
 
+# 테이블 마이그레이션 이력 — 기존 DB 파일에 새 컬럼을 ALTER TABLE 로 보정하기 위한 목록.
+_COLUMN_MIGRATIONS = {
+    "subscribers": {
+        "confirmed": "INTEGER NOT NULL DEFAULT 0",
+        "confirm_token": "TEXT",
+        "access_code": "TEXT",
+        "access_code_expires_at": "TEXT",
+    },
+}
+
+
+def _ensure_columns(conn, table, columns):
+    """table 에 없는 컬럼을 ALTER TABLE ADD COLUMN 으로 추가한다(가벼운 자체 마이그레이션)."""
+    existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    for name, ddl in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+
+
 def init_db(path=None):
-    """테이블/인덱스를 생성한다(이미 있으면 그대로 둔다)."""
-    # closing(): sqlite3 커넥션은 with 문만으로는 닫히지 않아(트랜잭션만 커밋) 명시적으로 닫는다.
-    #            Windows 에서 커넥션이 열린 채 남으면 파일이 잠겨 삭제/재열기가 막힌다.
+    """테이블/인덱스를 생성한다(이미 있으면 그대로 둔다).
+
+    이미 있는 DB 파일에 스키마가 새 컬럼을 추가하는 방향으로 바뀐 경우,
+    파일을 지우지 않아도 되도록 _COLUMN_MIGRATIONS 로 가볍게 보정한다
+    (예: subscribers 테이블에 confirmed/confirm_token 이 나중에 추가됨).
+    """
+    # closing(): sqlite3 커넥션을 명시적으로 닫아, 파일 삭제/수정이 막히는 현상을 방지한다.
     with closing(_connect(path)) as conn, conn:
-        conn.executescript(_SCHEMA)
+        conn.executescript(_SCHEMA)  # 1) 테이블 생성(없으면)
+        for table, columns in _COLUMN_MIGRATIONS.items():  # 2) 기존 테이블 컬럼 보정
+            _ensure_columns(conn, table, columns)
+        conn.executescript(_INDEXES)  # 3) 인덱스(보정된 컬럼 참조 가능)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -149,16 +141,21 @@ def upsert_subscriber(record, now=None, path=None):
     keywords 리스트는 JSON 문자열로 직렬화해 저장한다.
     검증(키워드 필터·시간 범위 등)은 subscriptions.save_subscription 이 맡고,
     여기서는 저장만 한다.
+
+    confirmed/confirm_token 은 이 함수가 직접 다루지 않는다 — 신규 구독자는
+    확인 전(confirmed=0) 상태로 새 토큰을 받고, 이미 있는 구독자는(정보만 수정하는
+    경우) 기존 확인 상태·토큰이 그대로 유지된다(ON CONFLICT 절에 두 컬럼을 넣지 않음).
     """
     ts = _now(now).isoformat()
+    new_token = secrets.token_urlsafe(24)  # 신규 삽입일 때만 실제로 쓰임(갱신이면 무시됨)
     with closing(_connect(path)) as conn, conn:
         conn.execute(
             """INSERT INTO subscribers
                  (email, name, keywords, send_hour, send_minute,
-                  frequency, summary_length, language, updated_at)
+                  frequency, summary_length, language, confirmed, confirm_token, updated_at)
                VALUES
                  (:email, :name, :keywords, :send_hour, :send_minute,
-                  :frequency, :summary_length, :language, :updated_at)
+                  :frequency, :summary_length, :language, 0, :confirm_token, :updated_at)
                ON CONFLICT(email) DO UPDATE SET
                   name=excluded.name,
                   keywords=excluded.keywords,
@@ -177,6 +174,7 @@ def upsert_subscriber(record, now=None, path=None):
                 "frequency": record.get("frequency"),
                 "summary_length": record.get("summary_length"),
                 "language": record.get("language"),
+                "confirm_token": new_token,
                 "updated_at": ts,
             },
         )
@@ -198,7 +196,7 @@ def fetch_all_subscribers(path=None):
         with closing(_connect(path)) as conn:
             rows = conn.execute(
                 """SELECT email, name, keywords, send_hour, send_minute,
-                          frequency, summary_length, language
+                          frequency, summary_length, language, confirmed
                    FROM subscribers ORDER BY email"""
             ).fetchall()
     except sqlite3.OperationalError:
@@ -211,6 +209,7 @@ def fetch_all_subscribers(path=None):
             record["keywords"] = json.loads(record["keywords"]) if record["keywords"] else []
         except (json.JSONDecodeError, TypeError):
             record["keywords"] = []
+        record["confirmed"] = bool(record["confirmed"])
         result.append(record)
     return result
 
@@ -224,7 +223,7 @@ def fetch_subscriber(email, path=None):
         with closing(_connect(path)) as conn:
             row = conn.execute(
                 """SELECT email, name, keywords, send_hour, send_minute,
-                          frequency, summary_length, language
+                          frequency, summary_length, language, confirmed
                    FROM subscribers WHERE email = ?""",
                 (email,),
             ).fetchone()
@@ -237,6 +236,7 @@ def fetch_subscriber(email, path=None):
         record["keywords"] = json.loads(record["keywords"]) if record["keywords"] else []
     except (json.JSONDecodeError, TypeError):
         record["keywords"] = []
+    record["confirmed"] = bool(record["confirmed"])
     return record
 
 
@@ -247,6 +247,88 @@ def count_subscribers(path=None):
             return conn.execute("SELECT COUNT(*) FROM subscribers").fetchone()[0]
     except sqlite3.OperationalError:
         return 0
+
+
+def fetch_confirm_token(email, path=None):
+    """이메일의 현재 확인 토큰을 반환. 이미 확인됐거나(토큰 폐기됨) 없는 이메일이면 None.
+    """
+    with closing(_connect(path)) as conn:
+        row = conn.execute(
+            "SELECT confirm_token FROM subscribers WHERE email = ?", (email,)
+        ).fetchone()
+    return row["confirm_token"] if row else None
+
+
+def confirm_subscriber(token, path=None):
+    """구독자 처리 후 토큰 폐기 수행
+
+    returns: 확인된 이메일. 토큰이 존재하지 않으면(이미 쓰였거나 잘못된 값) None.
+    """
+    with closing(_connect(path)) as conn, conn:
+        row = conn.execute(
+            "SELECT email FROM subscribers WHERE confirm_token = ?", (token,)
+        ).fetchone()
+        if row is None:
+            return None
+        conn.execute(
+            "UPDATE subscribers SET confirmed = 1, confirm_token = NULL WHERE confirm_token = ?",
+            (token,),
+        )
+    return row["email"]
+
+
+def generate_access_code(email, ttl_minutes=None, now=None, path=None):
+    """셀프서비스 본인 확인 코드 발급(confirm_token과 달리 만료 전까진 재사용 가능). 없는 이메일이면 None."""
+    ttl_minutes = config.ACCESS_CODE_TTL_MINUTES if ttl_minutes is None else ttl_minutes
+    code = secrets.token_hex(3).upper()
+    expires_at = (_now(now) + timedelta(minutes=ttl_minutes)).isoformat()
+    with closing(_connect(path)) as conn, conn:
+        cur = conn.execute(
+            "UPDATE subscribers SET access_code = ?, access_code_expires_at = ? WHERE email = ?",
+            (code, expires_at, email),
+        )
+    return code if cur.rowcount else None
+
+
+def verify_access_code(email, code, now=None, path=None):
+    """본인 확인 코드가 일치하고 만료 전인지 확인."""
+    if not code:
+        return False
+    with closing(_connect(path)) as conn:
+        row = conn.execute(
+            "SELECT access_code, access_code_expires_at FROM subscribers WHERE email = ?",
+            (email,),
+        ).fetchone()
+    if row is None or not row["access_code"]:
+        return False
+    if not hmac.compare_digest(row["access_code"], code):
+        return False
+    try:
+        expires_at = datetime.fromisoformat(row["access_code_expires_at"])
+    except (TypeError, ValueError):
+        return False
+    return _now(now) < expires_at
+
+
+def peek_access_code(email, path=None):
+    """(테스트용) 발급된 확인 코드 반환."""
+    with closing(_connect(path)) as conn:
+        row = conn.execute(
+            "SELECT access_code FROM subscribers WHERE email = ?", (email,)
+        ).fetchone()
+    return row["access_code"] if row else None
+
+
+def mark_confirmed(email, path=None):
+    """구독자를 확인됨으로 표시하고 토큰을 폐기한다.
+
+    확인 메일 절차를 거치지 않은 신뢰 가능한 경로(기존 JSON 이관 등)에서만 쓴다 —
+    이미 실제로 쓰던 구독자를 이 기능 도입 시점에 재확인 없이 넘겨받는 용도.
+    """
+    with closing(_connect(path)) as conn, conn:
+        conn.execute(
+            "UPDATE subscribers SET confirmed = 1, confirm_token = NULL WHERE email = ?", (email,)
+        )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -280,22 +362,41 @@ def save_articles(articles_by_keyword, now=None, path=None):
     return inserted
 
 
+def prune_old_articles(now=None, hours=None, path=None):
+    """RECENCY_HOURS(또는 지정한 hours)보다 오래된 기사를 삭제한다.
+
+    fetch_articles_for_keyword 가 이 창보다 오래된 기사는 애초에 요약 대상으로 삼지
+    않으므로, DB에 남겨둬도 다시 쓰일 일이 없다 — 저장 공간만 차지하는 죽은 데이터.
+    collect_job 이 돌 때마다(수집 직후) 호출해 articles 테이블이 무한히 커지지 않게 한다
+    (digests 가 조합당 최신 1건만 남기는 것과 같은 이유의 자체 정리).
+    returns: 삭제된 기사 수.
+    """
+    hours = config.RECENCY_HOURS if hours is None else hours
+    cutoff = _now(now) - timedelta(hours=hours)
+    with closing(_connect(path)) as conn, conn:
+        cur = conn.execute("DELETE FROM articles WHERE published_at < ?", (cutoff.isoformat(),))
+        return cur.rowcount
+
+
 def fetch_articles_for_keyword(keyword, now=None, hours=None, path=None):
     """keyword 에 해당하는 최근 기사를 cleaned_item 형태 리스트로 반환 (요약 잡 입력용).
 
     item: {"title", "link", "description", "published_at"}
     hours 미지정 시 config.RECENCY_HOURS(수집 보관 기간 전체, 기본 7일)를 쓴다
     — 즉 DB에 아직 남아있는 그 키워드의 기사 전부를 요약 대상으로 삼는다.
+    recency 필터를 SQL WHERE 절에서 처리한다(Python 에서 다 읽어와 거르지 않음) —
+    published_at 은 항상 타임존 포함 ISO 8601 문자열이라 사전식 비교가 시간 순서와 일치한다.
     """
     hours = config.RECENCY_HOURS if hours is None else hours
     cutoff = _now(now) - timedelta(hours=hours)
     with closing(_connect(path)) as conn:
         rows = conn.execute(
             """SELECT title, link, description, published_at
-               FROM articles WHERE keyword = ? ORDER BY published_at DESC""",
-            (keyword,),
+               FROM articles WHERE keyword = ? AND published_at >= ?
+               ORDER BY published_at DESC""",
+            (keyword, cutoff.isoformat()),
         ).fetchall()
-    return [dict(r) for r in rows if _is_recent(r["published_at"], cutoff)]
+    return [dict(r) for r in rows]
 
 
 def group_digest_rows(rows):
