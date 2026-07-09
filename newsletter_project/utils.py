@@ -61,6 +61,16 @@ def _request(method, path, **kwargs):
     return requests.request(method, url, timeout=10, **kwargs)
 
 
+def _auth_headers(admin_password=None, access_code=None):
+    """관리자 비밀번호/본인 확인 코드 중 있는 것만 헤더로 실어 보낸다."""
+    headers = {}
+    if admin_password:
+        headers["X-Admin-Password"] = admin_password
+    if access_code:
+        headers["X-Access-Code"] = access_code
+    return headers
+
+
 def _subscriber_to_dict(sub):
     """API 응답(SubscriberOut) -> 프론트에서 쓰기 편한 dict (send_time 문자열 포함)."""
     return {
@@ -141,21 +151,34 @@ def save_subscriber(name, email, keywords, send_time, frequency, summary_length,
     return True, None
 
 
-def get_subscriber_by_email(email):
+def request_access_code(email):
+    """본인 확인 코드를 이메일로 요청한다. (bool, 에러메시지) 반환."""
+    try:
+        resp = _request("POST", f"/subscribers/{email}/access-code")
+    except requests.RequestException as exc:
+        return False, f"서버에 연결할 수 없습니다: {exc}"
+
+    if resp.status_code != 202:
+        return False, _api_error_message(resp)
+    return True, None
+
+
+def get_subscriber_by_email(email, access_code):
     """
-    이메일을 기준으로 특정 구독자 1명의 정보를 가져오는 함수 (본인 확인용, 인증 불필요).
+    이메일 + 본인 확인 코드로 구독자 1명의 정보를 가져오는 함수.
 
     매개변수:
         email (str): 찾고 싶은 구독자의 이메일
+        access_code (str): request_access_code() 로 발급받은 본인 확인 코드
 
     반환값:
         dict 또는 None
         - 찾으면 {"name", "email", "keywords", "send_time", "frequency",
                   "summary_length", "language", "confirmed"} 반환
-        - 없으면 None 반환
+        - 없거나 코드가 틀렸으면(또는 만료) None 반환
     """
     try:
-        resp = _request("GET", f"/subscribers/{email}")
+        resp = _request("GET", f"/subscribers/{email}", headers=_auth_headers(access_code=access_code))
     except requests.RequestException:
         return None
 
@@ -164,30 +187,37 @@ def get_subscriber_by_email(email):
     return _subscriber_to_dict(resp.json())
 
 
-def delete_subscriber(email):
+def delete_subscriber(email, admin_password=None, access_code=None):
     """
-    이메일 기준 구독자 삭제
+    이메일 기준 구독자 삭제. 관리자(admin_password) 또는 본인(access_code) 인증 필요.
     """
     try:
-        resp = _request("DELETE", f"/subscribers/{email}")
+        resp = _request(
+            "DELETE", f"/subscribers/{email}",
+            headers=_auth_headers(admin_password, access_code),
+        )
     except requests.RequestException:
         return False
     return resp.status_code == 204
 
 
-def unsubscribe_subscriber(email):
+def unsubscribe_subscriber(email, access_code):
     """
-    일반 사용자가 자기 이메일로 구독 취소
+    일반 사용자가 본인 확인 코드로 자기 이메일 구독을 취소
     """
-    return delete_subscriber(email)
+    return delete_subscriber(email, access_code=access_code)
 
 
-def update_subscriber(old_email, name, new_email, keywords, send_time, frequency, summary_length, language):
+def update_subscriber(
+    old_email, name, new_email, keywords, send_time, frequency, summary_length, language,
+    admin_password=None, access_code=None,
+):
     """
-    기존 이메일(old_email)을 기준으로 구독자 정보 수정.
+    기존 이메일(old_email)을 기준으로 구독자 정보 수정. 관리자 또는 본인 인증 필요.
 
     이메일 자체는 구독자 식별자라 PUT으로 바꿀 수 없으므로(백엔드 제약),
-    이메일이 바뀌는 경우 새 이메일로 재가입(POST) 후 기존 항목을 삭제(DELETE)한다.
+    이메일이 바뀌는 경우 새 이메일로 재가입(POST, 인증 불필요한 공개 가입) 후
+    기존 항목을 삭제(DELETE, 기존 인증 그대로 사용)한다.
     이 경로를 타면 새 이메일은 다시 미확인(confirmed=False) 상태로 시작해
     확인 메일을 새로 받는다 — 이메일 소유권이 바뀌는 것이므로 의도된 동작이다.
 
@@ -197,7 +227,7 @@ def update_subscriber(old_email, name, new_email, keywords, send_time, frequency
         created, err = save_subscriber(name, new_email, keywords, send_time, frequency, summary_length, language)
         if not created:
             return False, err
-        delete_subscriber(old_email)
+        delete_subscriber(old_email, admin_password=admin_password, access_code=access_code)
         return True, None
 
     hour, minute = _parse_send_time(send_time)
@@ -211,7 +241,10 @@ def update_subscriber(old_email, name, new_email, keywords, send_time, frequency
         "language": language,
     }
     try:
-        resp = _request("PUT", f"/subscribers/{old_email}", json=payload)
+        resp = _request(
+            "PUT", f"/subscribers/{old_email}", json=payload,
+            headers=_auth_headers(admin_password, access_code),
+        )
     except requests.RequestException as exc:
         return False, f"서버에 연결할 수 없습니다: {exc}"
 

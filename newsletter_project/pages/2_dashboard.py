@@ -108,7 +108,8 @@ else:
                 send_time=edit_send_time,
                 frequency=edit_frequency,
                 summary_length=edit_summary_length,
-                language=edit_language
+                language=edit_language,
+                admin_password=admin_password,
             )
 
             if success:
@@ -126,7 +127,7 @@ else:
     )
 
     if st.button("선택한 구독자 삭제"):
-        success = delete_subscriber(selected_email_for_delete)
+        success = delete_subscriber(selected_email_for_delete, admin_password=admin_password)
 
         if success:
             st.success(f"{selected_email_for_delete} 구독 정보가 삭제되었습니다.")
