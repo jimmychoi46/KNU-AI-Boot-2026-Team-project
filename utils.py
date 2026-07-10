@@ -1,253 +1,438 @@
-import os
-
 import pandas as pd
-import requests
-from dotenv import load_dotenv
+import os
+import streamlit as st
 
-load_dotenv()
+# 구독자 정보를 저장할 CSV 파일 경로
+FILE_PATH = "subscribers.csv"
 
-API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 
-FREQUENCY_OPTIONS = ["매일", "주 3회", "매주"]
-SUMMARY_LENGTH_OPTIONS = ["짧게", "중간", "길게"]
-LANGUAGE_OPTIONS = ["한국어", "영어"]
+def load_common_css():
+    """
+    모든 페이지에서 공통으로 사용할 CSS를 주입하는 함수
+    각 페이지 상단에서 반드시 호출해야 함
+    """
+    st.markdown("""
+    <style>
+    /* =========================================================
+       공통 디자인 토큰 (단일 소스)
+       모든 폰트 크기 / 색상은 아래 변수로 통일한다.
+       ========================================================= */
+    :root {
+        --fs-hero-title: 40px;   /* 페이지 대제목 */
+        --fs-hero-sub:   20px;   /* 히어로 보조 문구 */
+        --fs-section:    26px;   /* 섹션 제목 */
+        --fs-card-title: 18px;   /* 카드 제목 */
+        --fs-body:       15px;   /* 본문 / 설명 */
+        --fs-label:      15px;   /* 위젯 라벨 */
+        --fs-metric-t:   14px;   /* 지표 라벨 */
+        --fs-metric-v:   22px;   /* 지표 값 */
+        --fs-nav:        18px;   /* 사이드바 네비게이션 */
+
+        --card-h: 160px;         /* 주요 기능 카드 고정 높이 */
+
+        --c-heading: #0F172A;
+        --c-body:    #334155;
+        --c-accent:  #1D4ED8;
+        --c-accent2: #3B82F6;
+        --c-border:  #BAE6FD;
+    }
+
+    /* 앱 전역 본문 기본 크기 통일 */
+    html, body, .stApp, [data-testid="stAppViewContainer"] {
+        font-size: var(--fs-body);
+    }
+
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+        padding-left: 3rem;
+        padding-right: 3rem;
+    }
+
+    /* =========================================================
+       사이드바 네비게이션
+       ========================================================= */
+    section[data-testid="stSidebar"] {
+        width: 320px !important;
+        min-width: 320px !important;
+        max-width: 320px !important;
+    }
+
+    section[data-testid="stSidebar"] .block-container {
+        padding-top: 1.2rem !important;
+        padding-left: 1rem !important;
+        padding-right: 1rem !important;
+    }
+
+    [data-testid="stSidebarNav"] ul {
+        gap: 10px !important;
+    }
+
+    [data-testid="stSidebarNav"] li {
+        margin-bottom: 10px !important;
+    }
+
+    [data-testid="stSidebarNav"] a {
+        display: flex !important;
+        align-items: center !important;
+        min-height: 56px !important;
+        padding: 14px 16px !important;
+        border-radius: 14px !important;
+        text-decoration: none !important;
+    }
+
+    [data-testid="stSidebarNav"] a span {
+        font-size: var(--fs-nav) !important;
+        font-weight: 700 !important;
+        line-height: 1.4 !important;
+        color: var(--c-heading) !important;
+    }
+
+    [data-testid="stSidebarNav"] a:hover {
+        background-color: #DCEEFF !important;
+    }
+
+    [data-testid="stSidebarNav"] a:hover span {
+        font-size: var(--fs-nav) !important;
+        font-weight: 700 !important;
+        color: var(--c-heading) !important;
+    }
+
+    [data-testid="stSidebarNav"] a[aria-current="page"] {
+        background-color: #A9D0F5 !important;
+        border-radius: 14px !important;
+    }
+
+    [data-testid="stSidebarNav"] a[aria-current="page"] span {
+        font-size: var(--fs-nav) !important;
+        font-weight: 800 !important;
+        color: var(--c-heading) !important;
+    }
+
+    /* =========================================================
+       히어로 / 제목
+       ========================================================= */
+    .hero-box {
+        background: linear-gradient(135deg, #E0F2FE 0%, #F0F9FF 100%);
+        padding: 28px;
+        border-radius: 22px;
+        margin-bottom: 28px;
+        border: 1px solid var(--c-border);
+    }
+
+    .page-title {
+        font-size: var(--fs-hero-title);
+        font-weight: 800;
+        color: var(--c-heading);
+        margin-bottom: 8px;
+    }
+
+    .hero-sub {
+        font-size: var(--fs-hero-sub);
+        font-weight: 700;
+        color: var(--c-accent);
+        margin-bottom: 10px;
+    }
+
+    .page-desc {
+        font-size: var(--fs-body);
+        color: var(--c-body);
+        line-height: 1.7;
+    }
+
+    .section-title {
+        font-size: var(--fs-section);
+        font-weight: 800;
+        color: var(--c-heading);
+        margin-top: 10px;
+        margin-bottom: 16px;
+    }
+
+    /* =========================================================
+       카드류
+       ========================================================= */
+    .info-card {
+        background-color: #FFFFFF;
+        border: 1px solid var(--c-border);
+        border-radius: 18px;
+        padding: 20px;
+        box-shadow: 0 6px 18px rgba(59, 130, 246, 0.10);
+        margin-bottom: 20px;
+        font-size: var(--fs-body);
+        color: var(--c-body);
+        line-height: 1.7;
+    }
+
+    .feature-card {
+        background-color: #FFFFFF;
+        border: 1px solid var(--c-border);
+        border-radius: 18px;
+        padding: 20px 24px;
+        box-shadow: 0 4px 12px rgba(59, 130, 246, 0.08);
+        margin-bottom: 16px;
+        min-height: 100px;
+    }
+
+    .feature-title {
+        font-size: var(--fs-card-title);
+        font-weight: 700;
+        color: var(--c-accent);
+        margin-bottom: 8px;
+    }
+
+    .feature-desc {
+        font-size: var(--fs-body);
+        color: var(--c-body);
+        line-height: 1.6;
+    }
+
+    .step-card {
+        background-color: #FFFFFF;
+        border: 1px solid var(--c-border);
+        border-radius: 18px;
+        padding: 20px 24px;
+        box-shadow: 0 4px 12px rgba(59, 130, 246, 0.08);
+        min-height: 100px;
+    }
+
+    .step-label {
+        font-size: var(--fs-card-title);
+        font-weight: 700;
+        color: var(--c-accent2);
+        margin-bottom: 8px;
+    }
+
+    .metric-card {
+        background-color: #FFFFFF;
+        border: 1px solid var(--c-border);
+        border-radius: 16px;
+        padding: 16px 18px;
+        margin-bottom: 16px;
+        box-shadow: 0 4px 12px rgba(59, 130, 246, 0.08);
+    }
+
+    .metric-title {
+        font-size: var(--fs-metric-t);
+        color: #64748B;
+        margin-bottom: 6px;
+        font-weight: 500;
+    }
+
+    .metric-value {
+        font-size: var(--fs-metric-v);
+        font-weight: 700;
+        color: var(--c-accent);
+    }
+
+    /* =========================================================
+       클릭 가능한 feature 카드 (st.page_link 기반)
+       사이드바와 동일하게 Streamlit 내부 라우팅을 사용하므로
+       전체 페이지 리로드가 발생하지 않는다.
+       ========================================================= */
+    /* 카드 컨테이너 + 내부 툴팁/문단 래퍼까지 전부 100% 폭 강제 */
+    [data-testid="stPageLink"] {
+        margin-bottom: 16px;
+        width: 100% !important;
+    }
+
+    [data-testid="stPageLink"] > div,
+    [data-testid="stPageLink"] > div > div,
+    [data-testid="stPageLink"] p {
+        width: 100% !important;
+        box-sizing: border-box !important;
+    }
+
+    [data-testid="stPageLink"] a[data-testid="stPageLink-NavLink"] {
+        display: flex !important;
+        flex-direction: column !important;
+        box-sizing: border-box !important;
+        background-color: #FFFFFF;
+        border: 1px solid var(--c-border);
+        border-radius: 18px;
+        padding: 22px 24px !important;
+        box-shadow: 0 4px 12px rgba(59, 130, 246, 0.08);
+        width: 100% !important;
+        height: var(--card-h) !important;
+        min-height: var(--card-h) !important;
+        max-height: var(--card-h) !important;
+        align-items: flex-start !important;
+        justify-content: flex-start !important;
+        overflow: hidden;
+        transition: box-shadow 0.2s ease, transform 0.2s ease, border-color 0.2s ease;
+    }
+
+    [data-testid="stPageLink"] a[data-testid="stPageLink-NavLink"]:hover {
+        box-shadow: 0 8px 24px rgba(59, 130, 246, 0.20);
+        transform: translateY(-2px);
+        border-color: var(--c-accent2);
+    }
+
+    [data-testid="stPageLink"] a[data-testid="stPageLink-NavLink"] p {
+        font-size: var(--fs-body);
+        color: var(--c-body);
+        line-height: 1.6;
+    }
+
+    /* 카드 제목(첫 강조 문구) 스타일 */
+    [data-testid="stPageLink"] a[data-testid="stPageLink-NavLink"] p strong {
+        display: block;
+        font-size: var(--fs-card-title);
+        font-weight: 700;
+        color: var(--c-accent);
+        margin-bottom: 6px;
+    }
+
+    /* =========================================================
+       네이티브 위젯 (라벨 / 버튼 / 알림) 폰트 통일
+       ========================================================= */
+    [data-testid="stWidgetLabel"] p,
+    label[data-testid="stWidgetLabel"] p {
+        font-size: var(--fs-label) !important;
+        font-weight: 600 !important;
+        color: var(--c-heading) !important;
+    }
+
+    /* 입력창 / 셀렉트박스 내부 텍스트 */
+    .stTextInput input,
+    .stSelectbox div[data-baseweb="select"] {
+        font-size: var(--fs-body) !important;
+    }
+
+    div.stButton > button {
+        background-color: var(--c-accent2);
+        color: white;
+        border: none;
+        border-radius: 10px;
+        padding: 10px 18px;
+        font-weight: 600;
+        font-size: var(--fs-body);
+    }
+
+    div.stButton > button:hover {
+        background-color: #2563EB;
+        color: white;
+    }
+
+    div[data-testid="stAlert"] {
+        border-radius: 12px;
+    }
+
+    div[data-testid="stAlert"] p {
+        font-size: var(--fs-body) !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
 
 def generate_time_options():
     """
-    00:00부터 24:00까지 30분 단위 시간 목록 생성
+    00:00부터 23:00까지 1시간 단위 시간 목록 생성
     """
-    times = []
-
-    for hour in range(24):
-        times.append(f"{hour:02d}:00")
-        times.append(f"{hour:02d}:30")
-
-    times.append("24:00")
-    return times
+    return [f"{hour:02d}:00" for hour in range(24)]
 
 
-def _split_keywords(keywords_str):
-    """'AI, Python, 스타트업' 같은 콤마 구분 문자열 -> 리스트."""
-    return [k.strip() for k in str(keywords_str).split(",") if k.strip()]
+def load_subscribers():
+    """
+    CSV 파일에서 구독자 정보를 불러오는 함수
+    파일이 없으면 빈 데이터프레임 반환
+    """
+    if not os.path.exists(FILE_PATH):
+        return pd.DataFrame(columns=[
+            "name", "email", "keywords",
+            "send_time", "frequency",
+            "summary_length", "language"
+        ])
+    return pd.read_csv(FILE_PATH)
 
 
-def _join_keywords(keywords_list):
-    """리스트 -> 콤마 구분 문자열 (입력 필드/표 표시용)."""
-    return ", ".join(keywords_list or [])
-
-
-def _parse_send_time(send_time):
-    """'HH:MM' -> (hour, minute). '24:00'은 hour=24, minute=0."""
-    hour_str, minute_str = str(send_time).split(":")
-    return int(hour_str), int(minute_str)
-
-
-def _format_send_time(hour, minute):
-    return f"{hour:02d}:{minute:02d}"
-
-
-def _api_error_message(response):
-    """API 에러 응답에서 detail 메시지를 뽑아낸다. 없으면 상태코드 기반 기본 메시지."""
-    try:
-        detail = response.json().get("detail")
-    except (ValueError, AttributeError):
-        detail = None
-    return detail or f"요청이 실패했습니다 (status={response.status_code})"
-
-
-def _request(method, path, **kwargs):
-    url = f"{API_BASE_URL}{path}"
-    return requests.request(method, url, timeout=10, **kwargs)
-
-
-def _auth_headers(admin_password=None, access_code=None):
-    """관리자 비밀번호/본인 확인 코드 중 있는 것만 헤더로 실어 보낸다."""
-    headers = {}
-    if admin_password:
-        headers["X-Admin-Password"] = admin_password
-    if access_code:
-        headers["X-Access-Code"] = access_code
-    return headers
-
-
-def _subscriber_to_dict(sub):
-    """API 응답(SubscriberOut) -> 프론트에서 쓰기 편한 dict (send_time 문자열 포함)."""
-    return {
-        "name": sub["name"],
-        "email": sub["email"],
-        "keywords": _join_keywords(sub["keywords"]),
-        "send_time": _format_send_time(sub["send_hour"], sub["send_minute"]),
-        "frequency": sub["frequency"],
-        "summary_length": sub["summary_length"],
-        "language": sub["language"],
-        "confirmed": sub["confirmed"],
+def save_subscriber(name, email, keywords, send_time,
+                    frequency, summary_length, language):
+    """
+    새 구독자 정보를 저장하는 함수
+    """
+    df = load_subscribers()
+    new_subscriber = {
+        "name": name,
+        "email": email,
+        "keywords": keywords,
+        "send_time": send_time,
+        "frequency": frequency,
+        "summary_length": summary_length,
+        "language": language
     }
+    df = pd.concat([df, pd.DataFrame([new_subscriber])], ignore_index=True)
+    df.to_csv(FILE_PATH, index=False)
 
 
-def load_subscribers(admin_password):
+def get_statistics():
     """
-    관리자 전용 전체 구독자 목록 조회.
-
-    반환값: (DataFrame, 에러메시지) 튜플. 성공 시 에러메시지는 None,
-    실패(인증 실패 등) 시 DataFrame은 None.
+    구독자 통계 계산
     """
-    try:
-        resp = _request("GET", "/subscribers", headers={"X-Admin-Password": admin_password})
-    except requests.RequestException as exc:
-        return None, f"서버에 연결할 수 없습니다: {exc}"
-
-    if resp.status_code != 200:
-        return None, _api_error_message(resp)
-
-    rows = [_subscriber_to_dict(s) for s in resp.json()]
-    columns = ["name", "email", "keywords", "send_time", "frequency", "summary_length", "language", "confirmed"]
-    return pd.DataFrame(rows, columns=columns), None
-
-
-def get_statistics(df):
-    """
-    구독자 통계 계산 (대시보드에서 불러온 DataFrame 기준).
-    """
-    if df is None or df.empty:
+    df = load_subscribers()
+    if df.empty:
         return {
             "total_subscribers": 0,
-            "confirmed_count": 0,
             "most_common_frequency": "없음",
-            "most_common_language": "없음",
+            "most_common_language": "없음"
         }
-
     return {
         "total_subscribers": len(df),
-        "confirmed_count": int(df["confirmed"].sum()),
         "most_common_frequency": df["frequency"].mode()[0],
-        "most_common_language": df["language"].mode()[0],
+        "most_common_language": df["language"].mode()[0]
     }
 
 
-def save_subscriber(name, email, keywords, send_time, frequency, summary_length, language):
+def delete_subscriber(email):
     """
-    새 구독 신청. 성공/실패와 메시지를 (bool, str|None) 로 반환한다.
-    (백엔드가 confirmed=False로 저장하고 확인 메일을 보내므로, 성공해도 즉시 발송 대상은 아니다.)
+    이메일 기준 구독자 삭제
     """
-    hour, minute = _parse_send_time(send_time)
-    payload = {
-        "email": email,
-        "name": name,
-        "keywords": _split_keywords(keywords),
-        "send_hour": hour,
-        "send_minute": minute,
-        "frequency": frequency,
-        "summary_length": summary_length,
-        "language": language,
-    }
-    try:
-        resp = _request("POST", "/subscribers", json=payload)
-    except requests.RequestException as exc:
-        return False, f"서버에 연결할 수 없습니다: {exc}"
-
-    if resp.status_code not in (200, 201):
-        return False, _api_error_message(resp)
-    return True, None
-
-
-def request_access_code(email):
-    """본인 확인 코드를 이메일로 요청한다. (bool, 에러메시지) 반환."""
-    try:
-        resp = _request("POST", f"/subscribers/{email}/access-code")
-    except requests.RequestException as exc:
-        return False, f"서버에 연결할 수 없습니다: {exc}"
-
-    if resp.status_code != 202:
-        return False, _api_error_message(resp)
-    return True, None
-
-
-def get_subscriber_by_email(email, access_code):
-    """
-    이메일 + 본인 확인 코드로 구독자 1명의 정보를 가져오는 함수.
-
-    매개변수:
-        email (str): 찾고 싶은 구독자의 이메일
-        access_code (str): request_access_code() 로 발급받은 본인 확인 코드
-
-    반환값:
-        dict 또는 None
-        - 찾으면 {"name", "email", "keywords", "send_time", "frequency",
-                  "summary_length", "language", "confirmed"} 반환
-        - 없거나 코드가 틀렸으면(또는 만료) None 반환
-    """
-    try:
-        resp = _request("GET", f"/subscribers/{email}", headers=_auth_headers(access_code=access_code))
-    except requests.RequestException:
-        return None
-
-    if resp.status_code != 200:
-        return None
-    return _subscriber_to_dict(resp.json())
-
-
-def delete_subscriber(email, admin_password=None, access_code=None):
-    """
-    이메일 기준 구독자 삭제. 관리자(admin_password) 또는 본인(access_code) 인증 필요.
-    """
-    try:
-        resp = _request(
-            "DELETE", f"/subscribers/{email}",
-            headers=_auth_headers(admin_password, access_code),
-        )
-    except requests.RequestException:
+    df = load_subscribers()
+    if df.empty:
         return False
-    return resp.status_code == 204
+    if email not in df["email"].values:
+        return False
+    df = df[df["email"] != email]
+    df.to_csv(FILE_PATH, index=False)
+    return True
 
 
-def unsubscribe_subscriber(email, access_code):
+def unsubscribe_subscriber(email):
     """
-    일반 사용자가 본인 확인 코드로 자기 이메일 구독을 취소
+    일반 사용자가 자기 이메일로 구독 취소
     """
-    return delete_subscriber(email, access_code=access_code)
+    return delete_subscriber(email)
 
 
-def update_subscriber(
-    old_email, name, new_email, keywords, send_time, frequency, summary_length, language,
-    admin_password=None, access_code=None,
-):
+def update_subscriber(old_email, name, new_email, keywords,
+                      send_time, frequency, summary_length, language):
     """
-    기존 이메일(old_email)을 기준으로 구독자 정보 수정. 관리자 또는 본인 인증 필요.
-
-    이메일 자체는 구독자 식별자라 PUT으로 바꿀 수 없으므로(백엔드 제약),
-    이메일이 바뀌는 경우 새 이메일로 재가입(POST, 인증 불필요한 공개 가입) 후
-    기존 항목을 삭제(DELETE, 기존 인증 그대로 사용)한다.
-    이 경로를 타면 새 이메일은 다시 미확인(confirmed=False) 상태로 시작해
-    확인 메일을 새로 받는다 — 이메일 소유권이 바뀌는 것이므로 의도된 동작이다.
-
-    반환값: (bool, str|None) 성공 여부와 실패 시 에러 메시지.
+    기존 이메일(old_email)을 기준으로 구독자 정보 수정
     """
-    if new_email != old_email:
-        created, err = save_subscriber(name, new_email, keywords, send_time, frequency, summary_length, language)
-        if not created:
-            return False, err
-        delete_subscriber(old_email, admin_password=admin_password, access_code=access_code)
-        return True, None
+    df = load_subscribers()
+    if df.empty:
+        return False
+    if old_email not in df["email"].values:
+        return False
+    row_index = df[df["email"] == old_email].index[0]
+    df.at[row_index, "name"]           = name
+    df.at[row_index, "email"]          = new_email
+    df.at[row_index, "keywords"]       = keywords
+    df.at[row_index, "send_time"]      = send_time
+    df.at[row_index, "frequency"]      = frequency
+    df.at[row_index, "summary_length"] = summary_length
+    df.at[row_index, "language"]       = language
+    df.to_csv(FILE_PATH, index=False)
+    return True
 
-    hour, minute = _parse_send_time(send_time)
-    payload = {
-        "name": name,
-        "keywords": _split_keywords(keywords),
-        "send_hour": hour,
-        "send_minute": minute,
-        "frequency": frequency,
-        "summary_length": summary_length,
-        "language": language,
-    }
-    try:
-        resp = _request(
-            "PUT", f"/subscribers/{old_email}", json=payload,
-            headers=_auth_headers(admin_password, access_code),
-        )
-    except requests.RequestException as exc:
-        return False, f"서버에 연결할 수 없습니다: {exc}"
 
-    if resp.status_code != 200:
-        return False, _api_error_message(resp)
-    return True, None
+def get_subscriber_by_email(email):
+    """
+    이메일을 기준으로 특정 구독자 1명의 정보를 가져오는 함수
+    """
+    df = load_subscribers()
+    if df.empty:
+        return None
+    matched_rows = df[df["email"] == email]
+    if matched_rows.empty:
+        return None
+    return matched_rows.iloc[0]
