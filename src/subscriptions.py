@@ -57,14 +57,30 @@ def _looks_like_email(email):
     return bool(_EMAIL_RE.match(email)) # 이메일 형식이 _EMAIL_RE에 정의된 형식인지 확인, 형식이 일치하면 True, 불일치 시 False
 
 
+def normalize_email(email):
+    """이메일을 식별자로 쓰기 전 항상 거치는 정규화(대소문자 무시).
+
+    대부분의 실제 메일 서비스는 로컬파트 대소문자를 구분하지 않으므로,
+    'Alice@Example.com'과 'alice@example.com'을 서로 다른 구독자로 만들지 않기 위해
+    조회/저장/URL 경로 파라미터 등 이메일이 등장하는 모든 지점에서 이 함수를 거친다.
+    """
+    return str(email).strip().lower()
+
+
 def _clean_keywords(keywords):
     """키워드 정리 수행
     
     작업 수행 순서: 앞뒤 공백 제거 → 빈값 제거 → 중복 제거
     """
+    # keywords 가 리스트가 아닐 수 있다(구 JSON 이관 등). 문자열이면 글자 단위로 쪼개지지 않게
+    # 키워드 1개로 감싸고, 숫자/None/불리언 등은 키워드 없음으로 처리한다(for 루프 TypeError 방지).
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    elif not isinstance(keywords, (list, tuple)):
+        keywords = []
     cleaned = []                        # 정리된 키워드를 담을 빈 리스트 정의
-    for k in keywords or []:            
-        k = str(k).strip()              # k를 문자열로 변환한 뒤, 공백 제거 수행      
+    for k in keywords:
+        k = str(k).strip()              # k를 문자열로 변환한 뒤, 공백 제거 수행
         if k and k not in cleaned:      # k가 존재하고 이미 cleaned에 존재하지 않는 경우 추가
             cleaned.append(k)
     return cleaned
@@ -80,7 +96,7 @@ def _from_row(row):
     email = row.get("email")
     if not email:
         raise ValueError("email 누락")
-    email = str(email).strip()
+    email = normalize_email(email)
     if not _looks_like_email(email):                                        # 이메일 형식 검증
         raise ValueError(f"유효한 이메일 형식이 아닙니다: {email!r}")
     send_hour, send_minute = _parse_send_time(row)                          # 발송 시간에서 시간, 분 분리
@@ -130,11 +146,11 @@ def save_subscription(record, path=None):
     """구독자 1명을 검증한 뒤 DB 에 저장(있으면 갱신)한다.
 
     프론트 대시보드가 신청/수정 시 호출하는 쓰기 API.
-    record 형식이 틀리면(email 누락·시각 범위 오류 등) ValueError 를 던진다.
+    record 형식이 틀리면(email 누락·시각 범위 오류 등) ValueError
     저장은 검증·정규화된 값(후보에 없는 키워드 제거, 기본값 채움)으로 이뤄진다.
     returns: 저장된 Subscription.
     """
-    sub = _from_row(record)  # 검증 + 정규화
+    sub = _from_row(record) 
     db.upsert_subscriber(
         {
             "email": sub.email,
@@ -195,7 +211,10 @@ def is_due(sub, now):
     """
     if not sub.confirmed:
         return False
-    if not (sub.send_hour == now.hour and sub.send_minute == now.minute):
+    # send_hour=24는 "자정(다음날 0시)"을 뜻하는 표시값(프론트의 "24:00" 옵션) —
+    # datetime.hour는 0~23뿐이라 그대로 비교하면 영원히 매칭되지 않으므로 0시로 정규화.
+    effective_hour = 0 if sub.send_hour == 24 else sub.send_hour
+    if not (effective_hour == now.hour and sub.send_minute == now.minute):
         return False
     weekdays = config.FREQUENCY_WEEKDAYS.get(sub.frequency, config.FREQUENCY_WEEKDAYS["매일"])
     return now.weekday() in weekdays
@@ -204,6 +223,21 @@ def is_due(sub, now):
 def due_subscribers(subscriptions, now):
     """now(datetime) 에 발송해야 하는 구독자만 필터링 (시:분 + 주기별 발송 요일)."""
     return [sub for sub in subscriptions if is_due(sub, now)]
+
+
+def is_weekly_anchor(sub, now):
+    """now 가 이 구독자의 '이번 주 첫 발송 요일'인가 (주간 트렌드 첨부 판정용).
+
+    주간 트렌드는 주기와 무관하게 한 주에 한 번, 그 구독자가 이번 주 처음 발송받는 요일에
+    얹는다. 발송 요일 집합(FREQUENCY_WEEKDAYS)의 가장 이른 요일(월=0 기준)을 앵커로 삼아,
+    발송 요일 규칙이 바뀌어도(팀 합의로 FREQUENCY_WEEKDAYS 를 고쳐도) 트렌드 첨부가 자동으로
+    따라오게 한다 — TREND_WEEKDAY 같은 별도 하드코딩 상수를 두면 그 규칙과 조용히 어긋난다.
+    알 수 없는 주기면 False(트렌드 미첨부).
+    """
+    weekdays = config.FREQUENCY_WEEKDAYS.get(sub.frequency)
+    if not weekdays:
+        return False
+    return now.weekday() == min(weekdays)
 
 
 def send_window_hours(sub, now):

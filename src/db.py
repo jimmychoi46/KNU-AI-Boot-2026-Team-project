@@ -5,6 +5,7 @@ import secrets
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timedelta
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pytz
 
@@ -37,11 +38,12 @@ CREATE TABLE IF NOT EXISTS articles (
 );
 
 CREATE TABLE IF NOT EXISTS digests (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    keyword        TEXT    NOT NULL,
-    summary_length TEXT    NOT NULL,   -- config.SUMMARY_LENGTH 중 하나
-    language       TEXT    NOT NULL,   -- config.LANGUAGE 중 하나
-    created_at     TEXT    NOT NULL
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    keyword           TEXT    NOT NULL,
+    summary_length    TEXT    NOT NULL,   -- config.SUMMARY_LENGTH 중 하나
+    language          TEXT    NOT NULL,   -- config.LANGUAGE 중 하나
+    created_at        TEXT    NOT NULL,
+    latest_article_at TEXT                -- 이 스냅샷이 담은 기사 중 가장 최근 발행일(발송 창 판정용)
 );
 
 CREATE TABLE IF NOT EXISTS digest_issues (
@@ -68,6 +70,13 @@ CREATE TABLE IF NOT EXISTS digest_links (
     FOREIGN KEY(topic_id) REFERENCES digest_topics(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS sent_articles (
+    email   TEXT    NOT NULL,          -- 수신자
+    link    TEXT    NOT NULL,          -- 정규화된 기사 링크(재발송 방지 키)
+    sent_at TEXT    NOT NULL,          -- ISO 8601 — 보존 기간 정리용
+    PRIMARY KEY(email, link)
+);
+
 """
 
 
@@ -76,6 +85,14 @@ CREATE INDEX IF NOT EXISTS idx_articles_keyword ON articles(keyword);
 CREATE INDEX IF NOT EXISTS idx_articles_published_at ON articles(published_at);
 CREATE INDEX IF NOT EXISTS idx_digests_lookup ON digests(keyword, summary_length, language, created_at);
 CREATE INDEX IF NOT EXISTS idx_subscribers_confirm_token ON subscribers(confirm_token);
+-- digests 이력을 8일 보존하면서 커지므로: 트렌드 집계 JOIN(digest_topics→digest_issues→digests)의
+-- 자식쪽 조인 컬럼과, prune_old_digests 의 created_at 단독 삭제를 각각 인덱스로 받쳐준다.
+-- (idx_digests_lookup 은 keyword 선두라 created_at 단독 필터엔 못 쓴다)
+CREATE INDEX IF NOT EXISTS idx_digest_issues_digest ON digest_issues(digest_id);
+CREATE INDEX IF NOT EXISTS idx_digest_topics_issue ON digest_topics(issue_id);
+CREATE INDEX IF NOT EXISTS idx_digests_created_at ON digests(created_at);
+-- 재발송 방지 원장: 조회는 PK(email, link) 로 받고, 보존 기간 정리(sent_at 단독)는 이 인덱스로.
+CREATE INDEX IF NOT EXISTS idx_sent_articles_sent_at ON sent_articles(sent_at);
 """
 
 
@@ -85,13 +102,19 @@ def _now(now=None):
 
 
 def _connect(path=None):
-    """DB 커넥션 반환. 상위 디렉터리가 없으면 만든다(첫 실행 대비)."""
+    """DB 커넥션 반환. 상위 디렉터리가 없으면 만든다(첫 실행 대비).
+
+    collect/summarize/dispatch 세 스케줄러 + API 서버가 같은 SQLite 파일에 동시
+    접근하므로, sqlite3 기본 타임아웃(5초)보다 넉넉히 잡아 짧은 락 경합에서
+    예외 대신 자체적으로 대기하도록 한다(PRAGMA busy_timeout도 동일한 값으로 맞춤).
+    """
     path = path or config.DB_PATH
     if path != ":memory:":
         os.makedirs(os.path.dirname(path), exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 15000")
     return conn
 
 
@@ -102,6 +125,10 @@ _COLUMN_MIGRATIONS = {
         "confirm_token": "TEXT",
         "access_code": "TEXT",
         "access_code_expires_at": "TEXT",
+        "last_sent_at": "TEXT",  # 중복 발송 방지용 — 마지막으로 실제 발송을 마친 시각
+    },
+    "digests": {
+        "latest_article_at": "TEXT",  # 스냅샷이 담은 기사 중 가장 최근 발행일(발송 창 판정용)
     },
 }
 
@@ -112,6 +139,35 @@ def _ensure_columns(conn, table, columns):
     for name, ddl in columns.items():
         if name not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+
+
+def _normalize_email_casing(conn):
+    """subscribers.email 을 전부 소문자로 통일한다(1회성·멱등 마이그레이션).
+
+    이메일 정규화(대소문자 무시)를 나중에 도입했을 때, 이미 대소문자가 섞인 채
+    저장된 기존 행까지 소급 적용하기 위한 자체 마이그레이션이다. 같은 메일함이
+    대소문자 차이로 두 행(예: alice@x.com / Alice@x.com)에 걸쳐 있었다면,
+    확인된(confirmed) 쪽을 남기고(둘 다 같으면 최근 수정된 쪽) 나머지는 버린다
+    — 이미 실사용 중이던 확인 상태·설정을 최대한 보존하기 위함.
+    이후 저장/조회는 모두 subscriptions.normalize_email 을 거치므로, 이 함수는
+    두 번째 실행부터는 아무 것도 바꾸지 않는다(멱등).
+    """
+    rows = conn.execute("SELECT * FROM subscribers").fetchall()
+    groups = {}
+    for row in rows:
+        groups.setdefault(row["email"].strip().lower(), []).append(row)
+
+    for lower_email, group in groups.items():
+        group.sort(key=lambda r: (r["confirmed"], r["updated_at"] or ""), reverse=True)
+        survivor = group[0]
+        for dup in group[1:]:
+            conn.execute("DELETE FROM subscribers WHERE email = ?", (dup["email"],))
+            print(f"[이메일 정규화] 중복 구독자 병합: {dup['email']!r} → {lower_email!r} (삭제됨)")
+        if survivor["email"] != lower_email:
+            conn.execute(
+                "UPDATE subscribers SET email = ? WHERE email = ?",
+                (lower_email, survivor["email"]),
+            )
 
 
 def init_db(path=None):
@@ -127,6 +183,7 @@ def init_db(path=None):
         for table, columns in _COLUMN_MIGRATIONS.items():  # 2) 기존 테이블 컬럼 보정
             _ensure_columns(conn, table, columns)
         conn.executescript(_INDEXES)  # 3) 인덱스(보정된 컬럼 참조 가능)
+        _normalize_email_casing(conn)  # 4) 기존 행의 이메일 대소문자 통일(1회성·멱등)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -199,7 +256,8 @@ def fetch_all_subscribers(path=None):
                           frequency, summary_length, language, confirmed
                    FROM subscribers ORDER BY email"""
             ).fetchall()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
+        print(f"[DB 경고] fetch_all_subscribers 실패({exc}) - 이번 호출은 빈 목록으로 처리됩니다")
         return []
 
     result = []
@@ -227,7 +285,8 @@ def fetch_subscriber(email, path=None):
                    FROM subscribers WHERE email = ?""",
                 (email,),
             ).fetchone()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
+        print(f"[DB 경고] fetch_subscriber({email!r}) 실패({exc}) - 이번 호출은 None으로 처리됩니다")
         return None
     if row is None:
         return None
@@ -245,7 +304,8 @@ def count_subscribers(path=None):
     try:
         with closing(_connect(path)) as conn:
             return conn.execute("SELECT COUNT(*) FROM subscribers").fetchone()[0]
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
+        print(f"[DB 경고] count_subscribers 실패({exc}) - 이번 호출은 0으로 처리됩니다")
         return 0
 
 
@@ -257,6 +317,15 @@ def fetch_confirm_token(email, path=None):
             "SELECT confirm_token FROM subscribers WHERE email = ?", (email,)
         ).fetchone()
     return row["confirm_token"] if row else None
+
+
+def peek_confirm_token(token, path=None):
+    """토큰이 가리키는 이메일을 확정 없이 조회한다(확인 페이지 표시용). 없으면 None."""
+    with closing(_connect(path)) as conn:
+        row = conn.execute(
+            "SELECT email FROM subscribers WHERE confirm_token = ?", (token,)
+        ).fetchone()
+    return row["email"] if row else None
 
 
 def confirm_subscriber(token, path=None):
@@ -278,9 +347,14 @@ def confirm_subscriber(token, path=None):
 
 
 def generate_access_code(email, ttl_minutes=None, now=None, path=None):
-    """셀프서비스 본인 확인 코드 발급(confirm_token과 달리 만료 전까진 재사용 가능). 없는 이메일이면 None."""
+    """셀프서비스 본인 확인 코드 발급(confirm_token과 달리 만료 전까진 재사용 가능). 없는 이메일이면 None.
+
+    코드는 32비트(8자리 hex ≈ 43억 경우의 수)로 만든다. 예전 24비트(6자리)는 여러 IP를 돌려가며
+    TTL(기본 15분) 안에 특정 이메일을 표적 브루트포스할 여지가 있었다 — 조회→수정의 2단계 흐름
+    때문에 코드를 1회용으로 폐기할 수는 없어(재사용 필요), 대신 탐색 공간을 키워 방어한다.
+    """
     ttl_minutes = config.ACCESS_CODE_TTL_MINUTES if ttl_minutes is None else ttl_minutes
-    code = secrets.token_hex(3).upper()
+    code = secrets.token_hex(4).upper()
     expires_at = (_now(now) + timedelta(minutes=ttl_minutes)).isoformat()
     with closing(_connect(path)) as conn, conn:
         cur = conn.execute(
@@ -301,7 +375,11 @@ def verify_access_code(email, code, now=None, path=None):
         ).fetchone()
     if row is None or not row["access_code"]:
         return False
-    if not hmac.compare_digest(row["access_code"], code):
+    try:
+        if not hmac.compare_digest(row["access_code"], code):
+            return False
+    except TypeError:
+        # 비ASCII 코드가 헤더로 오면 compare_digest 가 TypeError — 500 대신 인증 실패로 처리.
         return False
     try:
         expires_at = datetime.fromisoformat(row["access_code_expires_at"])
@@ -319,6 +397,27 @@ def peek_access_code(email, path=None):
     return row["access_code"] if row else None
 
 
+def claim_dispatch(email, now=None, within_seconds=90, path=None):
+    """이번 발송 슬롯을 원자적으로 선점한다(중복 발송 방지). 선점 성공 시 True.
+
+    within_seconds 안에 발송한 적(last_sent_at 갱신)이 없을 때만 last_sent_at 을 지금으로
+    올리고 True 를 반환한다. 조건부 UPDATE 한 방이라, 분 단위 디스패처(dispatch_job)가
+    같은 틱에 두 프로세스로 겹쳐 돌아도(예: 롤링 배포 중 신·구 프로세스가 겹치는 구간)
+    정확히 한 쪽만 rowcount=1 로 선점해 발송하고 나머지는 False 로 건너뛴다.
+    '읽어서 확인 → 나중에 표시'로 나누면 그 사이가 레이스라, 선점을 조건부 UPDATE 하나로
+    원자화한다. 정상적인 다음 발송 슬롯(최소 30분 뒤)까지는 걸리지 않는다.
+    """
+    now = _now(now)
+    cutoff = (now - timedelta(seconds=within_seconds)).isoformat()
+    with closing(_connect(path)) as conn, conn:
+        cur = conn.execute(
+            """UPDATE subscribers SET last_sent_at = ?
+               WHERE email = ? AND (last_sent_at IS NULL OR last_sent_at < ?)""",
+            (now.isoformat(), email, cutoff),
+        )
+    return cur.rowcount == 1
+
+
 def mark_confirmed(email, path=None):
     """구독자를 확인됨으로 표시하고 토큰을 폐기한다.
 
@@ -329,6 +428,90 @@ def mark_confirmed(email, path=None):
         conn.execute(
             "UPDATE subscribers SET confirmed = 1, confirm_token = NULL WHERE email = ?", (email,)
         )
+
+
+# ─────────────────────────────────────────────────────────────
+# 재발송 방지 원장 (sent_articles) — 구독자별로 이미 받은 기사를 다음 발송에서 뺀다
+# ─────────────────────────────────────────────────────────────
+
+_TRACKING_PARAM_PREFIXES = ("utm_",)
+_TRACKING_PARAMS = {"fbclid", "gclid", "igshid", "spm", "ref", "ref_src"}
+
+
+def _normalize_link(link):
+    """재발송 방지 비교용 링크 정규화.
+
+    추적용 쿼리 파라미터(utm_*, fbclid 등)만 제거하고 나머지 쿼리는 보존한다 — 네이버 뉴스처럼
+    oid/aid 쿼리가 '기사 식별자'인 경우 쿼리를 통째로 지우면 서로 다른 기사가 같게 뭉개지기 때문.
+    추가로 스킴/호스트 소문자화 + 프래그먼트 제거 + 경로 끝 슬래시 제거 + 쿼리 파라미터 정렬을 한다
+    (파라미터 순서만 바뀐 같은 기사(?oid=1&aid=2 vs ?aid=2&oid=1)를 같은 키로 본다 — 키가 달라도
+    서로 다른 기사는 여전히 다른 키라 안 뭉개진다).
+    """
+    if not link:
+        return ""
+    try:
+        parts = urlsplit(link.strip())
+    except ValueError:
+        return link.strip()
+    query = sorted(
+        (k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+        if not k.lower().startswith(_TRACKING_PARAM_PREFIXES) and k.lower() not in _TRACKING_PARAMS
+    )
+    path = parts.path.rstrip("/") or parts.path
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, urlencode(query), ""))
+
+
+def fetch_seen_links(email, links, path=None):
+    """email 이 이미 받은(원장에 있는) 링크만 골라 반환.
+
+    입력 links(원본 문자열들) 중 정규화 형태가 원장에 있는 것들의 '원본'을 set 으로 돌려준다.
+    """
+    norm_map = {}
+    for link in links:
+        norm_map.setdefault(_normalize_link(link), []).append(link)
+    norms = [n for n in norm_map if n]
+    if not norms:
+        return set()
+    seen = set()
+    try:
+        with closing(_connect(path)) as conn:
+            # SQLite 변수 한도(구버전 999) 대비 IN 절을 청크로 나눠 조회한다.
+            for i in range(0, len(norms), 400):
+                chunk = norms[i:i + 400]
+                placeholders = ",".join("?" * len(chunk))
+                for row in conn.execute(
+                    f"SELECT link FROM sent_articles WHERE email = ? AND link IN ({placeholders})",
+                    (email, *chunk),
+                ).fetchall():
+                    seen.update(norm_map.get(row["link"], []))
+    except sqlite3.OperationalError as exc:
+        # 일시적 DB 락 등으로 원장 조회가 실패하면 '아무것도 안 본 것'으로 간주해 발송은 진행한다
+        # — 그 틱을 통째로 놓치는 것보다 낫다(이미 본 기사가 한 번 더 나갈 수는 있으나 발송은 성사).
+        print(f"[원장 조회 경고] {email}: {exc} - 이번엔 재발송 방지를 건너뜁니다")
+        return set()
+    return seen
+
+
+def record_sent_articles(email, links, now=None, path=None):
+    """email 에게 방금 발송한 기사 링크들을 원장에 기록(정규화 후, 이미 있으면 무시)."""
+    ts = _now(now).isoformat()
+    norms = {_normalize_link(link) for link in links if link and _normalize_link(link)}
+    if not norms:
+        return
+    with closing(_connect(path)) as conn, conn:
+        conn.executemany(
+            "INSERT OR IGNORE INTO sent_articles (email, link, sent_at) VALUES (?, ?, ?)",
+            [(email, link, ts) for link in norms],
+        )
+
+
+def prune_sent_articles(now=None, hours=None, path=None):
+    """보존 기간(SENT_ARTICLE_RETENTION_HOURS)보다 오래된 원장 항목을 정리. 삭제 수 반환."""
+    hours = config.SENT_ARTICLE_RETENTION_HOURS if hours is None else hours
+    cutoff = (_now(now) - timedelta(hours=hours)).isoformat()
+    with closing(_connect(path)) as conn, conn:
+        cur = conn.execute("DELETE FROM sent_articles WHERE sent_at < ?", (cutoff,))
+        return cur.rowcount
 
 
 # ─────────────────────────────────────────────────────────────
@@ -442,25 +625,40 @@ def group_digest_rows(rows):
     ]
 
 
-def save_digest(keyword, summary_length, language, rows, now=None, path=None):
+def _digest_cutoff(now=None, hours=None):
+    """다이제스트 보존 경계 시각(ISO). 이보다 오래된 다이제스트는 정리 대상.
+
+    save_digest(조합별 정리)와 prune_old_digests(전체 정리)가 같은 보존 기준을 공유하도록
+    컷오프 계산을 한곳에 둔다 — 보존 정책을 바꿀 때 두 곳이 어긋나지 않게.
+    """
+    hours = config.DIGEST_RECENCY_HOURS if hours is None else hours
+    return (_now(now) - timedelta(hours=hours)).isoformat()
+
+
+def save_digest(keyword, summary_length, language, rows, now=None, latest_article_at=None, path=None):
     """summarizer 의 평평한 요약 행을 이슈→주제→기사 계층으로 묶어 새 다이제스트로 저장.
 
     rows 가 비어있으면 저장하지 않고 None 을 반환한다.
-    발송(fetch_digests_for_keywords)은 조합당 '최신' 다이제스트 1개만 쓰므로, 새로
-    저장하는 즉시 같은 (keyword, summary_length, language) 조합의 예전 다이제스트는
-    바로 지운다(하위 issue/topic/link 는 FK ON DELETE CASCADE 로 함께 삭제) —
-    summarize_job 이 30분마다 도는 걸 그대로 두면 스냅샷이 무한히 쌓이므로,
-    "TODO: 나중에 정리" 로 미루지 않고 조합당 항상 최신 1건만 남도록 즉시 정리한다.
+    발송(fetch_digests_for_keywords)은 조합당 '최신' 다이제스트 1개만 쓰지만, 주간 트렌드
+    키워드 집계(get_top_topic_articles)가 지난 며칠치 이력을 훑어야 하므로 예전 스냅샷을 즉시
+    지우지 않고 DIGEST_RECENCY_HOURS 만큼 보존한다 — 그보다 오래된 것만 이번에 정리한다
+    (하위 issue/topic/link 는 FK ON DELETE CASCADE 로 함께 삭제).
+    latest_article_at: 이 스냅샷이 담은 기사 중 가장 최근 발행일(ISO). 발송 시 구독자 창 안에
+        실제 새 기사가 있을 때만 보내는 판정에 쓴다 — 새 뉴스가 없으면 30분마다 재요약돼 스냅샷의
+        created_at 은 늘 최신이라, 같은 옛 기사를 매일 반복 발송하는 걸 이 값으로 막는다.
     returns: 생성된 digest_id (rows 가 비었으면 None).
     """
     issues = group_digest_rows(rows)
     if not issues:
         return None
-    ts = _now(now).isoformat()
+    now = _now(now)
+    ts = now.isoformat()
+    cutoff = _digest_cutoff(now)
     with closing(_connect(path)) as conn, conn:
         digest_id = conn.execute(
-            "INSERT INTO digests (keyword, summary_length, language, created_at) VALUES (?, ?, ?, ?)",
-            (keyword, summary_length, language, ts),
+            "INSERT INTO digests (keyword, summary_length, language, created_at, latest_article_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (keyword, summary_length, language, ts, latest_article_at),
         ).lastrowid
         for i_idx, issue in enumerate(issues):
             issue_id = conn.execute(
@@ -479,17 +677,127 @@ def save_digest(keyword, summary_length, language, rows, now=None, path=None):
                 )
         conn.execute(
             """DELETE FROM digests
-               WHERE keyword = ? AND summary_length = ? AND language = ? AND id != ?""",
-            (keyword, summary_length, language, digest_id),
+               WHERE keyword = ? AND summary_length = ? AND language = ? AND id != ? AND created_at < ?""",
+            (keyword, summary_length, language, digest_id, cutoff),
         )
     return digest_id
+
+
+def prune_old_digests(now=None, hours=None, path=None):
+    """DIGEST_RECENCY_HOURS(또는 지정한 hours)보다 오래된 다이제스트를 삭제한다.
+
+    save_digest 는 같은 (keyword, summary_length, language) 조합이 다시 저장될 때만
+    오래된 스냅샷을 정리하므로, 구독이 끊기는 등 더는 갱신되지 않는 조합의 이력은 여기서
+    별도로 정리한다(prune_old_articles 와 같은 이유의 자체 정리).
+    returns: 삭제된 다이제스트 수.
+    """
+    cutoff = _digest_cutoff(now, hours)
+    with closing(_connect(path)) as conn, conn:
+        cur = conn.execute("DELETE FROM digests WHERE created_at < ?", (cutoff,))
+        return cur.rowcount
+
+
+def get_top_topics(keyword, since, limit=None, path=None):
+    """keyword 의 since 이후 다이제스트에 등장한 topic 을 '등장한 날 수' 순으로 상위 limit개 반환.
+
+    summary_length/language 구분 없이 그 keyword 로 쌓인 모든 다이제스트를 훑는다 —
+    "무엇이 자주 다뤄졌는지"는 구독자가 고른 요약 길이/언어와 무관한 신호이기 때문.
+    집계 기준은 스냅샷 '개수'가 아니라 '서로 다른 날짜 수'다. summarize_job 이 30분마다
+    같은 기사를 재요약해 스냅샷을 계속 새로 만들기 때문에, 개수로 세면 오래 우려먹힌 이슈가
+    하루에도 ~48건씩 쌓여 순위를 지배한다 — 날짜 단위로 세면 그 30분 중복 팽창이 사라지고
+    "이번 주 며칠에 걸쳐 다뤄졌나"라는 지속성 신호가 된다. 동률이면 총 등장 수, 그다음 이름 순.
+    (LLM이 매 실행마다 topic 을 새로 지어내므로, 같은 사안도 표현이 갈리면 따로 집계되는 근사치)
+    returns: [(topic, days), ...] 등장일 수 내림차순.
+    """
+    limit = config.TREND_TOP_N if limit is None else limit
+    since = since.isoformat() if hasattr(since, "isoformat") else since
+    with closing(_connect(path)) as conn:
+        rows = conn.execute(
+            # created_at 은 항상 KST(+09:00) ISO 문자열이라 앞 10글자(YYYY-MM-DD)가 곧 KST 날짜다.
+            # SQLite DATE() 는 오프셋을 UTC로 환산해 09:00 경계에서 하루가 어긋나므로 substr 로 자른다.
+            """SELECT dt.topic AS topic,
+                      COUNT(DISTINCT substr(d.created_at, 1, 10)) AS days,
+                      COUNT(*) AS cnt
+               FROM digest_topics dt
+               JOIN digest_issues di ON di.id = dt.issue_id
+               JOIN digests d ON d.id = di.digest_id
+               WHERE d.keyword = ? AND d.created_at >= ?
+               GROUP BY dt.topic
+               ORDER BY days DESC, cnt DESC, dt.topic ASC
+               LIMIT ?""",
+            (keyword, since, limit),
+        ).fetchall()
+    return [(row["topic"], row["days"]) for row in rows]
+
+
+def get_top_topic_articles(keyword, since, language=None, limit=None, path=None):
+    """get_top_topics 와 같은 순위로, 각 상위 topic 의 요약과 관련 기사 링크까지 함께 반환.
+
+    주간 트렌드를 '키워드 나열'이 아니라 '토픽 + 요약 + 관련 기사'로 보여주기 위한 함수.
+    관련 기사는 그 주에 이미 요약·저장해 둔 다이제스트의 것을 재사용한다(추가 수집/LLM 호출 없음)
+    — 같은 topic 이 여러 스냅샷에 걸쳐 있으면 가장 최근 다이제스트의 요약·링크를 대표로 쓴다.
+    language 를 주면 그 언어로 만든 다이제스트만 훑는다 — topic 제목·요약이 언어별 문자열이라,
+    한국어 구독자에게 (같은 키워드를 구독하는) 영어 구독자용 영문 topic·요약이 섞여 나가는 걸 막는다.
+    (summary_length 는 표시 문자열이 같은 언어라 구분하지 않는다 — 무엇이 자주 다뤄졌나는 길이와 무관.)
+    returns: [{"topic", "article_count", "summary", "links": [str,...]}, ...] 관련 기사 수 내림차순.
+    """
+    limit = config.TREND_TOP_N if limit is None else limit
+    since = since.isoformat() if hasattr(since, "isoformat") else since
+    lang_clause = " AND d.language = ?" if language else ""
+    base_params = [keyword, since] + ([language] if language else [])
+    with closing(_connect(path)) as conn:
+        ranked = conn.execute(
+            # 순위 기준 = 그 topic 에 붙은 '서로 다른 관련 기사 수'(링크 중복 제거). 예전엔 '등장한 날 수'
+            # 였는데, summarize_job 이 30분마다 같은 기사를 재요약해 새 스냅샷을 만들어서 하루짜리 뉴스도
+            # 최대 7일로 부풀려졌다(대부분 topic 이 상한에 몰려 사실상 tie-break 로만 갈림). 같은 기사는
+            # 같은 링크라 DISTINCT dl.link 로 세면 그 재요약 팽창에 면역이고 "얼마나 많은 기사가 다뤘나"가 된다.
+            f"""SELECT dt.topic AS topic,
+                      COUNT(DISTINCT dl.link) AS article_count,
+                      COUNT(*) AS cnt
+               FROM digest_topics dt
+               JOIN digest_issues di ON di.id = dt.issue_id
+               JOIN digests d ON d.id = di.digest_id
+               LEFT JOIN digest_links dl ON dl.topic_id = dt.id
+               WHERE d.keyword = ? AND d.created_at >= ?{lang_clause}
+               GROUP BY dt.topic
+               ORDER BY article_count DESC, cnt DESC, dt.topic ASC
+               LIMIT ?""",
+            (*base_params, limit),
+        ).fetchall()
+        result = []
+        for row in ranked:
+            latest = conn.execute(
+                # 그 topic 이 등장한 가장 최근 다이제스트의 요약·링크를 대표로 쓴다.
+                f"""SELECT dt.id AS topic_id, dt.topic_summary AS summary
+                   FROM digest_topics dt
+                   JOIN digest_issues di ON di.id = dt.issue_id
+                   JOIN digests d ON d.id = di.digest_id
+                   WHERE d.keyword = ? AND d.created_at >= ?{lang_clause} AND dt.topic = ?
+                   ORDER BY d.created_at DESC LIMIT 1""",
+                (*base_params, row["topic"]),
+            ).fetchone()
+            links = []
+            summary = ""
+            if latest is not None:
+                summary = latest["summary"]
+                links = [
+                    r["link"] for r in conn.execute(
+                        "SELECT link FROM digest_links WHERE topic_id = ?", (latest["topic_id"],),
+                    ).fetchall()
+                ]
+            result.append({"topic": row["topic"], "article_count": row["article_count"],
+                           "summary": summary, "links": links})
+    return result
 
 
 def fetch_digests_for_keywords(keywords, summary_length, language, now=None, hours=None, path=None):
     """구독자 키워드 + (summary_length, language) 조합의 '최신' 다이제스트를 {keyword: [issue,...]} 로 반환.
 
     키워드마다 그 조합으로 만들어진 가장 최근 다이제스트 1개만 쓴다(그 이전 스냅샷은 버림).
-    그 최신 것조차 hours 시간보다 오래됐으면(최근 갱신 없었음) 그 키워드는 결과에서 제외한다.
+    신선도 판정은 다이제스트가 담은 '가장 최근 기사 발행일'(latest_article_at)이 hours 창 안인지로 한다
+    — created_at(스냅샷 생성 시각)은 30분마다 재요약돼 늘 최신이라, 새 기사가 없어도 매번 통과해
+    같은 옛 기사를 반복 발송하게 된다. 창 안에 실제 새 기사가 없으면(=그 창의 갱신 없음) 제외한다.
+    (예전 스냅샷은 latest_article_at 이 NULL 이라 created_at 으로 폴백 — 하위호환.)
     hours 미지정 시 config.SUMMARY_RECENCY_HOURS.
     """
     if not keywords:
@@ -501,12 +809,15 @@ def fetch_digests_for_keywords(keywords, summary_length, language, now=None, hou
     with closing(_connect(path)) as conn:
         for keyword in keywords:
             digest = conn.execute(
-                """SELECT id, created_at FROM digests
+                """SELECT id, created_at, latest_article_at FROM digests
                    WHERE keyword = ? AND summary_length = ? AND language = ?
                    ORDER BY created_at DESC LIMIT 1""",
                 (keyword, summary_length, language),
             ).fetchone()
-            if digest is None or not _is_recent(digest["created_at"], cutoff):
+            if digest is None:
+                continue
+            freshness = digest["latest_article_at"] or digest["created_at"]
+            if not _is_recent(freshness, cutoff):
                 continue
             issues = _load_issues(conn, digest["id"])
             if issues:

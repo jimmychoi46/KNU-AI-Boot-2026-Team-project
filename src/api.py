@@ -3,10 +3,13 @@ import hmac
 from contextlib import asynccontextmanager
 from urllib.parse import quote
 
-from fastapi import Depends, FastAPI, HTTPException, Security
+from fastapi import BackgroundTasks, Depends, FastAPI, Form, HTTPException, Request, Security
 from fastapi.responses import HTMLResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from src import config, db, subscriptions
 from src.notifiers import send_email
@@ -14,10 +17,21 @@ from src.notifiers import send_email
 _admin_password_header = APIKeyHeader(name="X-Admin-Password", auto_error=False)
 _access_code_header = APIKeyHeader(name="X-Access-Code", auto_error=False)
 
+# 가입/인증코드 발송/본인확인 엔드포인트는 인증 없이 호출 가능해 무차별 대입(코드 브루트포스)·
+# 메일 폭탄의 표적이 된다. IP 기준으로 속도를 제한해 두 위험을 함께 줄인다.
+limiter = Limiter(key_func=get_remote_address)
+
 
 def _is_admin(password):
     """X-Admin-Password 값이 유효한 관리자 인증인지. ADMIN_PASSWORD 미설정 시 항상 거부(안전 기본값)."""
-    return bool(config.ADMIN_PASSWORD) and bool(password) and hmac.compare_digest(password, config.ADMIN_PASSWORD)
+    if not (config.ADMIN_PASSWORD and password):
+        return False
+    try:
+        return hmac.compare_digest(password, config.ADMIN_PASSWORD)
+    except TypeError:
+        # 비ASCII 문자(헤더로 온 0xE9 등)면 compare_digest 가 TypeError 를 던진다 —
+        # 500 이 아니라 인증 실패(잘못된 값=불일치)로 처리한다.
+        return False
 
 
 def require_admin(password: str | None = Security(_admin_password_header)):
@@ -32,15 +46,17 @@ def require_admin(password: str | None = Security(_admin_password_header)):
         raise HTTPException(status_code=401, detail="관리자 인증 실패")
 
 
-def require_admin_or_owner(
-    email: str,
-    admin_password: str | None = Security(_admin_password_header),
-    access_code: str | None = Security(_access_code_header),
-):
-    """GET/PUT/DELETE .../{email} 용 인증: 관리자 비밀번호 또는 본인 확인 코드."""
+def _check_admin_or_owner(email, admin_password, access_code):
+    """GET/PUT/DELETE .../{email} 용 인증: 관리자 비밀번호 또는 본인 확인 코드(실패 시 401).
+
+    FastAPI 의 dependencies=[] 가 아니라 엔드포인트 본문 안에서 호출한다 — 그래야
+    @limiter.limit 데코레이터가 요청을 먼저 집계한 뒤 이 검사가 돈다. dependencies 로
+    걸면 401 이 데코레이터보다 먼저 나서 실패 요청이 rate limit 에 집계되지 않고,
+    본인 확인 코드(6자리 hex) 무차별 대입을 사실상 막지 못한다.
+    """
     if _is_admin(admin_password):
         return
-    if access_code and db.verify_access_code(email, access_code):
+    if access_code and db.verify_access_code(subscriptions.normalize_email(email), access_code):
         return
     raise HTTPException(status_code=401, detail="본인 확인이 필요합니다. 인증 코드를 요청해주세요.")
 
@@ -84,6 +100,13 @@ class SubscriberOut(BaseModel):
     summary_length: str
     language: str
     confirmed: bool = Field(description="이메일 소유 확인(더블 옵트인) 여부 — 확인 전엔 발송 대상 아님")
+
+
+class OptionsOut(BaseModel):
+    """응답: 프론트가 선택지 드롭다운을 채울 때 쓰는 서버 쪽 정답값."""
+    frequency: list[str]
+    summary_length: list[str]
+    language: list[str]
 
 
 def _record(payload, email):
@@ -158,8 +181,8 @@ def _send_access_code_email(email, code):
         print(f"[본인 확인 코드 발송 실패] {email}: {exc}")
 
 
-def _confirm_page_html(success, email):
-    """GET /confirm 결과로 보여줄 최소한의 안내 HTML(이메일 클라이언트에서 링크 클릭 시 뜸)."""
+def _confirm_result_page_html(success, email):
+    """POST /confirm 처리 결과로 보여줄 안내 HTML."""
     if success:
         return (
             "<html><body style=\"font-family: sans-serif;\">"
@@ -175,9 +198,40 @@ def _confirm_page_html(success, email):
     )
 
 
+def _confirm_prompt_page_html(token, email):
+    """GET /confirm 결과로 보여줄 '확정하시겠습니까?' 안내 페이지.
+
+    이메일 클라이언트/보안 스캐너가 링크를 미리 열람(prefetch)해도 이 GET 자체는
+    아무 상태도 바꾸지 않는다 — 실제 확정은 사용자가 버튼을 눌러야 발생하는
+    POST /confirm 에서만 일어난다(더블 옵트인이 사전열람으로 우회되는 것을 방지).
+    """
+    if email is None:
+        return (
+            "<html><body style=\"font-family: sans-serif;\">"
+            "<h2>확인 링크가 유효하지 않습니다</h2>"
+            "<p>이미 사용됐거나 잘못된 링크입니다. 구독을 다시 신청해주세요.</p>"
+            "</body></html>"
+        )
+    return (
+        "<html><body style=\"font-family: sans-serif;\">"
+        "<h2>구독을 확정하시겠습니까?</h2>"
+        f"<p>{html.escape(email)} 앞으로 뉴스레터를 받으시려면 아래 버튼을 눌러주세요.</p>"
+        f'<form method="post" action="/confirm">'
+        f'<input type="hidden" name="token" value="{html.escape(token, quote=True)}">'
+        '<button type="submit">구독 확정하기</button>'
+        "</form>"
+        "</body></html>"
+    )
+
+
 @asynccontextmanager
 async def lifespan(app):
     db.init_db()  # 서버 시작 시 테이블 보장
+    # 배포 시 외부 주소 미설정 감지 — 기본값(localhost)이면 확인/구독취소 메일 링크가 죽는다.
+    #   값이 없어도 에러 없이 조용히 기본값을 쓰므로, 최소한 시작 로그로 신호를 남긴다.
+    for _name, _url in (("API_BASE_URL", config.API_BASE_URL), ("FRONTEND_BASE_URL", config.FRONTEND_BASE_URL)):
+        if "localhost" in _url or "127.0.0.1" in _url:
+            print(f"[설정 경고] {_name}={_url} (기본값) - 실제 배포라면 메일 링크가 열리지 않습니다. 외부 주소를 환경변수로 설정하세요.")
     yield
 
 
@@ -187,68 +241,118 @@ app = FastAPI(
     description="데일리 금융 뉴스 브리핑 — 구독자 관리 API",
     lifespan=lifespan,
 )
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
+
+
+@app.get("/options", response_model=OptionsOut, summary="선택지 목록 조회")
+def get_options():
+    """frequency/summary_length/language 선택지를 반환한다.
+
+    이 셋은 표시용 라벨이 아니라 스케줄링(FREQUENCY_WEEKDAYS)·LLM 프롬프트
+    (LENGTH_PRESETS, 언어 지시)가 실제로 키로 쓰는 값이라 백엔드가 정의해야 한다.
+    프론트가 하드코딩하면 백엔드에서 선택지가 바뀌었을 때 조용히 어긋난다.
+    """
+    return OptionsOut(
+        frequency=config.FREQUENCY,
+        summary_length=config.SUMMARY_LENGTH,
+        language=config.LANGUAGE,
+    )
 
 
 @app.post("/subscribers", response_model=SubscriberOut, status_code=201, summary="구독 추가(신규 구독)")
-def create_subscriber(payload: SubscriberIn):
+@limiter.limit("5/hour")
+def create_subscriber(request: Request, payload: SubscriberIn, background_tasks: BackgroundTasks):
     """구독자를 새로 추가한다.
 
     이미 확인(confirmed)된 이메일로 다시 신청하면 409. 아직 미확인 상태인 이메일로
     다시 신청하면(예: 확인 메일을 못 받음) 새 가입이 아니라 확인 메일 재전송으로
     처리한다(같은 토큰 재사용, 정보는 이번 요청 값으로 갱신).
-    저장 후 confirmed=False 인 동안은 확인 메일을 (재)발송한다.
+    저장 후 confirmed=False 인 동안은 확인 메일을 (재)발송한다(응답 후 백그라운드 발송 —
+    SMTP 지연이 응답을 붙잡지 않도록).
     """
-    existing = subscriptions.get_subscription(payload.email)
+    email = subscriptions.normalize_email(payload.email)
+    existing = subscriptions.get_subscription(email)
     if existing is not None and existing.confirmed:
-        raise HTTPException(status_code=409, detail=f"이미 구독 중인 이메일입니다: {payload.email}")
+        raise HTTPException(status_code=409, detail=f"이미 구독 중인 이메일입니다: {email}")
     try:
-        sub = subscriptions.save_subscription(_record(payload, payload.email))
+        sub = subscriptions.save_subscription(_record(payload, email))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     if not sub.confirmed:
-        _send_confirmation_email(sub.email)
+        background_tasks.add_task(_send_confirmation_email, sub.email)
     return _out(sub)
 
 
-@app.get("/confirm", response_class=HTMLResponse, summary="이메일 구독 확인(더블 옵트인)")
-def confirm_subscription(token: str):
-    """확인 메일 링크(GET /confirm?token=...)의 token 으로 구독을 확정한다(confirmed=True).
+@app.get("/confirm", response_class=HTMLResponse, summary="이메일 구독 확인 안내 페이지")
+def confirm_prompt(token: str):
+    """확인 메일 링크(GET /confirm?token=...) 클릭 시 뜨는 안내 페이지.
+
+    이 GET 자체는 구독을 확정하지 않는다(메일 보안 스캐너의 사전열람으로 더블
+    옵트인이 무력화되는 것을 막기 위함) — 실제 확정은 이 페이지의 버튼이 보내는
+    POST /confirm 에서 이뤄진다. 토큰이 잘못됐거나 이미 쓰였으면 400.
+    """
+    email = db.peek_confirm_token(token)
+    status_code = 200 if email is not None else 400
+    return HTMLResponse(_confirm_prompt_page_html(token, email), status_code=status_code)
+
+
+@app.post("/confirm", response_class=HTMLResponse, summary="이메일 구독 확인(더블 옵트인)")
+def confirm_subscription(token: str = Form(...)):
+    """확인 페이지의 버튼(POST /confirm)으로 구독을 확정한다(confirmed=True).
 
     확정 전까지는 어떤 정기/속보 발송도 받지 않는다. 토큰은 1회용이라 확인 후 폐기되며,
     잘못됐거나 이미 쓰인 토큰이면 400.
     """
     email = db.confirm_subscriber(token)
     if email is None:
-        return HTMLResponse(_confirm_page_html(False, None), status_code=400)
-    return HTMLResponse(_confirm_page_html(True, email))
+        return HTMLResponse(_confirm_result_page_html(False, None), status_code=400)
+    return HTMLResponse(_confirm_result_page_html(True, email))
 
 
-@app.get(
-    "/subscribers", response_model=list[SubscriberOut], summary="전체 구독자 조회(관리자)",
-    dependencies=[Depends(require_admin)],
-)
-def list_subscribers():
-    """전체 구독자 목록. 관리자 전용 — X-Admin-Password 헤더 인증 필요(401 시 거부)."""
+@app.get("/subscribers", response_model=list[SubscriberOut], summary="전체 구독자 조회(관리자)")
+@limiter.limit("30/minute")
+def list_subscribers(request: Request, admin_password: str | None = Security(_admin_password_header)):
+    """전체 구독자 목록. 관리자 전용 — X-Admin-Password 헤더 인증 필요(401 시 거부).
+
+    인증 검사를 dependencies= 가 아니라 본문에서 하는 이유는 다른 관리자/본인 엔드포인트와
+    같다 — @limiter.limit 이 요청을 먼저 집계한 뒤 인증이 돌아야 실패 요청도 속도 제한에
+    걸려 관리자 비밀번호 무차별 대입(성공 시 전체 구독자 PII 유출)을 막을 수 있다.
+    """
+    require_admin(admin_password)
     return [_out(s) for s in subscriptions.load_subscriptions()]
 
 
-
 @app.post("/subscribers/{email}/access-code", status_code=202, summary="본인 확인 코드 발송")
-def request_access_code(email: str):
-    """본인 확인 코드를 이메일로 발송한다. 없는 이메일이면 404."""
-    if subscriptions.get_subscription(email) is None:
-        raise HTTPException(status_code=404, detail=f"구독자를 찾을 수 없습니다: {email}")
-    code = db.generate_access_code(email)
-    _send_access_code_email(email, code)
-    return {"detail": "인증 코드를 이메일로 보냈습니다."}
+@limiter.limit("5/hour")
+def request_access_code(request: Request, email: str, background_tasks: BackgroundTasks):
+    """등록된 이메일이면 본인 확인 코드를 발송한다.
+
+    이메일이 존재하지 않아도 항상 동일한 202를 반환한다(구독 여부가 응답으로
+    노출되는 이메일 존재 확인(enumeration)을 막기 위함) — 실제 발송은 존재할 때만 한다.
+    발송(SMTP)은 응답 후 백그라운드로 돌린다 — 존재할 때만 동기 SMTP를 태우면 응답 시간
+    차이(수백 ms~수 초)로 구독 여부가 타이밍 사이드채널로 새기 때문(202 일괄 반환의 취지 무력화).
+    """
+    email = subscriptions.normalize_email(email)
+    if subscriptions.get_subscription(email) is not None:
+        code = db.generate_access_code(email)
+        background_tasks.add_task(_send_access_code_email, email, code)
+    return {"detail": "등록된 이메일이면 인증 코드를 보냈습니다."}
 
 
 @app.get(
     "/subscribers/{email}", response_model=SubscriberOut, summary="구독 정보 조회",
-    dependencies=[Depends(require_admin_or_owner)],
 )
-def get_subscriber(email: str):
+@limiter.limit("10/minute")
+def get_subscriber(
+    request: Request,
+    email: str,
+    admin_password: str | None = Security(_admin_password_header),
+    access_code: str | None = Security(_access_code_header),
+):
     """이메일로 구독 정보를 조회한다. 없으면 404."""
+    _check_admin_or_owner(email, admin_password, access_code)
+    email = subscriptions.normalize_email(email)
     sub = subscriptions.get_subscription(email)
     if sub is None:
         raise HTTPException(status_code=404, detail=f"구독자를 찾을 수 없습니다: {email}")
@@ -257,10 +361,18 @@ def get_subscriber(email: str):
 
 @app.put(
     "/subscribers/{email}", response_model=SubscriberOut, summary="구독자 정보 수정",
-    dependencies=[Depends(require_admin_or_owner)],
 )
-def update_subscriber(email: str, payload: SubscriberUpdate):
+@limiter.limit("10/minute")
+def update_subscriber(
+    request: Request,
+    email: str,
+    payload: SubscriberUpdate,
+    admin_password: str | None = Security(_admin_password_header),
+    access_code: str | None = Security(_access_code_header),
+):
     """구독자 정보를 수정한다. 없으면 404, 값이 잘못되면 400."""
+    _check_admin_or_owner(email, admin_password, access_code)
+    email = subscriptions.normalize_email(email)
     if subscriptions.get_subscription(email) is None:
         raise HTTPException(status_code=404, detail=f"구독자를 찾을 수 없습니다: {email}")
     try:
@@ -272,9 +384,16 @@ def update_subscriber(email: str, payload: SubscriberUpdate):
 
 @app.delete(
     "/subscribers/{email}", status_code=204, summary="구독 취소",
-    dependencies=[Depends(require_admin_or_owner)],
 )
-def delete_subscriber(email: str):
+@limiter.limit("10/minute")
+def delete_subscriber(
+    request: Request,
+    email: str,
+    admin_password: str | None = Security(_admin_password_header),
+    access_code: str | None = Security(_access_code_header),
+):
     """구독을 취소(삭제)한다. 없으면 404."""
+    _check_admin_or_owner(email, admin_password, access_code)
+    email = subscriptions.normalize_email(email)
     if not subscriptions.delete_subscription(email):
         raise HTTPException(status_code=404, detail=f"구독자를 찾을 수 없습니다: {email}")

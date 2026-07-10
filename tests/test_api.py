@@ -30,6 +30,9 @@ class TestSubscriberApi(unittest.TestCase):
         self.addCleanup(admin_patcher.stop)
         db.init_db(self.path)
         self.addCleanup(lambda: os.path.exists(self.path) and os.remove(self.path))
+        # 속도 제한 카운터는 앱 전역(모듈) 상태라 테스트마다 리셋해야 서로의 호출 수가
+        # 누적돼 무관한 테스트가 429로 실패하는 걸 막을 수 있다.
+        api.limiter.reset()
         self.client = TestClient(api.app)
         # 실제 SMTP 연결 방지(느림·네트워크 의존) — 확인 메일 발송 여부만 스파이로 확인
         send_patcher = mock.patch.object(api.send_email, "send_email")
@@ -50,7 +53,24 @@ class TestSubscriberApi(unittest.TestCase):
         self.client.post(f"/subscribers/{email}/access-code")
         return db.peek_access_code(email, path=self.path)
 
+    # ── GET /options ─────────────────────────────────────────
+    def test_get_options_returns_config_values(self):
+        res = self.client.get("/options")
+        self.assertEqual(res.status_code, 200)
+        body = res.json()
+        self.assertEqual(body["frequency"], config.FREQUENCY)
+        self.assertEqual(body["summary_length"], config.SUMMARY_LENGTH)
+        self.assertEqual(body["language"], config.LANGUAGE)
+
     # ── POST ──────────────────────────────────────────────────
+    def test_create_rate_limited_after_5_per_hour(self):
+        # 같은 IP(테스트 클라이언트는 항상 동일 IP)로 6번째 가입 시도부터 429
+        for i in range(5):
+            res = self.client.post("/subscribers", json=self._body(email=f"rl{i}@x.com"))
+            self.assertEqual(res.status_code, 201)
+        res = self.client.post("/subscribers", json=self._body(email="rl-over@x.com"))
+        self.assertEqual(res.status_code, 429)
+
     def test_create_returns_201_and_normalized(self):
         # 키워드는 자유 입력 — 후보 제한 없이 공백/중복만 정리
         res = self.client.post("/subscribers", json=self._body(keywords=["수학", " 주식 ", "수학"]))
@@ -64,7 +84,7 @@ class TestSubscriberApi(unittest.TestCase):
     def test_create_confirmed_duplicate_returns_409(self):
         self.client.post("/subscribers", json=self._body())
         token = db.fetch_confirm_token("a@x.com", path=self.path)
-        self.client.get(f"/confirm?token={token}")  # 확인 완료 상태로 만듦
+        self.client.post("/confirm", data={"token": token})  # 확인 완료 상태로 만듦
         res = self.client.post("/subscribers", json=self._body())
         self.assertEqual(res.status_code, 409)
 
@@ -95,30 +115,45 @@ class TestSubscriberApi(unittest.TestCase):
         res = self.client.post("/subscribers", json=self._body(send_hour=24, send_minute=0))
         self.assertEqual(res.status_code, 201)
 
-    # ── GET /confirm (더블 옵트인) ────────────────────────────────
-    def test_confirm_with_valid_token_returns_200(self):
+    # ── GET /confirm (안내 페이지, 상태 변경 없음) ──────────────────
+    def test_confirm_prompt_with_valid_token_returns_200(self):
         self.client.post("/subscribers", json=self._body())
         token = db.fetch_confirm_token("a@x.com", path=self.path)
         res = self.client.get(f"/confirm?token={token}")
         self.assertEqual(res.status_code, 200)
         self.assertIn("a@x.com", res.text)
 
-    def test_confirm_makes_subscriber_confirmed(self):
+    def test_confirm_prompt_does_not_confirm_subscriber(self):
+        # GET은 안내 페이지만 보여준다 — 메일 보안 스캐너의 사전열람으로 확정되면 안 됨
         self.client.post("/subscribers", json=self._body())
         token = db.fetch_confirm_token("a@x.com", path=self.path)
         self.client.get(f"/confirm?token={token}")
         res = self.client.get("/subscribers/a@x.com", headers=self._admin_headers())
-        self.assertTrue(res.json()["confirmed"])
+        self.assertFalse(res.json()["confirmed"])
 
-    def test_confirm_with_invalid_token_returns_400(self):
+    def test_confirm_prompt_with_invalid_token_returns_400(self):
         res = self.client.get("/confirm?token=not-a-real-token")
         self.assertEqual(res.status_code, 400)
 
-    def test_confirm_token_cannot_be_reused(self):
+    # ── POST /confirm (더블 옵트인 실제 확정) ────────────────────────
+    def test_confirm_post_returns_200_and_confirms(self):
         self.client.post("/subscribers", json=self._body())
         token = db.fetch_confirm_token("a@x.com", path=self.path)
-        self.client.get(f"/confirm?token={token}")
-        res = self.client.get(f"/confirm?token={token}")  # 재사용
+        res = self.client.post("/confirm", data={"token": token})
+        self.assertEqual(res.status_code, 200)
+        self.assertIn("a@x.com", res.text)
+        check = self.client.get("/subscribers/a@x.com", headers=self._admin_headers())
+        self.assertTrue(check.json()["confirmed"])
+
+    def test_confirm_post_with_invalid_token_returns_400(self):
+        res = self.client.post("/confirm", data={"token": "not-a-real-token"})
+        self.assertEqual(res.status_code, 400)
+
+    def test_confirm_post_token_cannot_be_reused(self):
+        self.client.post("/subscribers", json=self._body())
+        token = db.fetch_confirm_token("a@x.com", path=self.path)
+        self.client.post("/confirm", data={"token": token})
+        res = self.client.post("/confirm", data={"token": token})  # 재사용
         self.assertEqual(res.status_code, 400)
 
     # ── GET /subscribers (관리자 인증) ───────────────────────────
@@ -142,6 +177,16 @@ class TestSubscriberApi(unittest.TestCase):
         with mock.patch.object(config, "ADMIN_PASSWORD", None):
             res = self.client.get("/subscribers", headers={"X-Admin-Password": ADMIN_PASSWORD})
         self.assertEqual(res.status_code, 401)
+
+    def test_wrong_admin_password_counts_against_rate_limit(self):
+        # 보안 회귀: 관리자 GET /subscribers 에 rate limit 이 있고, 인증 실패(401)도 집계돼야
+        # ADMIN_PASSWORD 무차별 대입(성공 시 전체 구독자 PII 유출)을 막는다.
+        statuses = [
+            self.client.get("/subscribers", headers={"X-Admin-Password": "wrong"}).status_code
+            for _ in range(31)
+        ]
+        self.assertTrue(all(s == 401 for s in statuses[:30]))  # 처음 30번은 인증 실패(집계됨)
+        self.assertEqual(statuses[30], 429)  # 31번째는 30/minute 초과로 차단
 
     def test_get_one_with_access_code(self):
         self.client.post("/subscribers", json=self._body())
@@ -172,6 +217,19 @@ class TestSubscriberApi(unittest.TestCase):
         res = self.client.get("/subscribers/a@x.com", headers={"X-Access-Code": code})
         self.assertEqual(res.status_code, 401)
 
+    def test_wrong_access_code_counts_against_rate_limit(self):
+        # 보안 회귀: 인증 실패(401)도 rate limit에 집계돼야 본인 확인 코드(6자리 hex)
+        # 무차별 대입을 막는다. 예전엔 인증을 dependencies=로 걸어 401이 @limiter.limit보다
+        # 먼저 나서, 실패 요청이 집계되지 않아 무제한으로 코드를 시도할 수 있었다.
+        self.client.post("/subscribers", json=self._body())
+        statuses = [
+            self.client.get("/subscribers/a@x.com",
+                            headers={"X-Access-Code": "WRONG1"}).status_code
+            for _ in range(11)
+        ]
+        self.assertTrue(all(s == 401 for s in statuses[:10]))  # 처음 10번은 인증 실패(집계됨)
+        self.assertEqual(statuses[10], 429)  # 11번째는 rate limit 초과로 차단
+
     def test_get_missing_with_admin_returns_404(self):
         res = self.client.get("/subscribers/none@x.com", headers=self._admin_headers())
         self.assertEqual(res.status_code, 404)
@@ -190,9 +248,11 @@ class TestSubscriberApi(unittest.TestCase):
         self.send_email.assert_called_once()
         self.assertEqual(self.send_email.call_args.args[0], "a@x.com")
 
-    def test_request_access_code_missing_email_returns_404(self):
+    def test_request_access_code_missing_email_returns_202_without_sending(self):
+        # 없는 이메일이어도 404 대신 동일한 202를 반환한다(구독 여부 노출 방지) — 메일만 안 보낸다
         res = self.client.post("/subscribers/none@x.com/access-code")
-        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.status_code, 202)
+        self.send_email.assert_not_called()
 
     def test_access_code_reusable_within_window(self):
         # 조회 후 수정처럼 API를 연달아 부르는 흐름을 지원하기 위해 1회용이 아니다

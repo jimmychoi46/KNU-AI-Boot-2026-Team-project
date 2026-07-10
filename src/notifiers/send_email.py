@@ -2,7 +2,7 @@ import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-from src.config import EMAIL_SENDER, GOOGLE_APP_PASSWORD
+from src.config import EMAIL_SENDER, GOOGLE_APP_PASSWORD, SMTP_TIMEOUT
 
 
 def send_email(to_email, subject, body_html):
@@ -19,7 +19,9 @@ def send_email(to_email, subject, body_html):
     message["To"] = to_email
     message.attach(MIMEText(body_html, "html"))
 
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+    # timeout 없으면 서버 무응답 시 소켓이 영원히 블록 — 예외가 아니라 '행'이라 호출부
+    # try/except 로도 못 막는다. SMTP_TIMEOUT 을 줘서 무응답을 예외(TimeoutError)로 전환한다.
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=SMTP_TIMEOUT) as server:
         server.login(EMAIL_SENDER, GOOGLE_APP_PASSWORD)
         server.sendmail(EMAIL_SENDER, to_email, message.as_string())
 

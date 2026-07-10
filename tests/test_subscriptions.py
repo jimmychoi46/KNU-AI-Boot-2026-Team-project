@@ -57,6 +57,14 @@ class TestDueSubscribers(unittest.TestCase):
         sub = self._sub("u@x.com", 8, 0, confirmed=False)
         self.assertEqual(due_subscribers([sub], TUE), [])
 
+    def test_send_hour_24_matches_midnight(self):
+        # "24:00"(자정) 선택 구독자는 now.hour==0 일 때 발송 대상이어야 한다(0~23만 있는
+        # datetime.hour와 그대로 비교하면 영원히 매칭되지 않는 버그의 회귀 테스트)
+        sub = self._sub("m@x.com", 24, 0)
+        midnight = TUE.replace(hour=0, minute=0)
+        self.assertEqual([s.email for s in due_subscribers([sub], midnight)], ["m@x.com"])
+        self.assertEqual(due_subscribers([sub], TUE.replace(hour=23, minute=0)), [])
+
 
 class TestSendWindow(unittest.TestCase):
     """주기별 되돌아보는 창(hours) — 직전 발송 요일까지의 간격."""
@@ -93,6 +101,12 @@ class TestFromRow(unittest.TestCase):
         sub = _from_row({"email": "  user@example.com  ", "keywords": ["주식"],
                          "send_hour": 8, "send_minute": 0})
         self.assertEqual(sub.email, "user@example.com")   # 앞뒤 공백 제거
+
+    def test_email_lowercased(self):
+        # 대소문자만 다른 이메일이 서로 다른 구독자로 취급되지 않도록 항상 소문자로 정규화
+        sub = _from_row({"email": "Alice@Example.COM", "keywords": ["주식"],
+                         "send_hour": 8, "send_minute": 0})
+        self.assertEqual(sub.email, "alice@example.com")
 
     def test_keywords_free_input_cleaned(self):
         # 자유 입력: 후보 제한 없음. 공백 정리·빈값/중복 제거(순서 유지)만.

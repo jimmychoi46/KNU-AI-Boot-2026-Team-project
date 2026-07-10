@@ -39,6 +39,16 @@ class TestRunForSubscriber(unittest.TestCase):
             pipeline.run_for_subscriber(sub)
         send.assert_called_once()
 
+    def test_summarize_failure_does_not_crash_or_send(self):
+        # LLM 응답 스키마가 어긋나는 등 요약 실패는 이 발송만 건너뛰고 예외를 밖으로 전파하지 않는다
+        sub = Subscription("a@x.com", keywords=["주식"], send_hour=8, send_minute=0, confirmed=True)
+        news = {"주식": [{"title": "속보", "link": "https://a", "description": "", "published_at": None}]}
+        with mock.patch.object(pipeline.naver_news, "collect", return_value=news), \
+             mock.patch.object(pipeline.summarizer, "summarize", side_effect=AttributeError("bad shape")), \
+             mock.patch.object(pipeline.send_email, "send_email") as send:
+            pipeline.run_for_subscriber(sub)  # 예외가 나지 않아야 한다
+        send.assert_not_called()
+
     def test_unconfirmed_does_not_send(self):
         # 이메일 미확인 구독자는 뉴스가 있어도 발송하지 않는다
         sub = Subscription("a@x.com", keywords=["주식"], send_hour=8, send_minute=0, confirmed=False)
@@ -71,6 +81,10 @@ class TestBatchJobs(unittest.TestCase):
         published = (self.now - timedelta(hours=1)).isoformat()
         news = {"주식": [{"title": "삼성 주가 급등", "link": "https://a/1",
                           "description": "본문", "published_at": published}]}
+        # dispatch 단계의 claim_dispatch(조건부 UPDATE)가 걸리도록 구독자 행을 DB에 심는다
+        # — 실제 경로에선 load_subscriptions가 DB에서 읽어오므로 행이 항상 존재한다.
+        db.upsert_subscriber({"email": "a@x.com", "keywords": ["주식"],
+                              "send_hour": 18, "send_minute": 0}, now=self.now, path=self.path)
 
         # ① 수집 잡: 뉴스 수집(목)해 DB 저장
         with mock.patch.object(pipeline, "load_subscriptions", return_value=[self._sub()]), \
@@ -102,6 +116,25 @@ class TestBatchJobs(unittest.TestCase):
              mock.patch.object(pipeline.naver_news, "collect", return_value={"주식": []}):
             pipeline.collect_job(now=self.now)
         self.assertEqual(db.fetch_articles_for_keyword("주식", now=self.now, hours=999, path=self.path), [])
+
+    def test_dispatch_one_does_not_double_send_within_same_tick(self):
+        # 롤링 배포 등으로 같은 틱에 dispatch_one이 두 번 불려도 두 번째는 건너뛴다.
+        # claim_dispatch는 subscribers 테이블 행을 조건부 UPDATE로 선점하므로
+        # (실제 흐름에서는 load_subscriptions가 그 테이블에서 읽어오므로 항상 있음) 먼저
+        # 구독자를 DB에 실제로 저장해 둬야 한다.
+        db.upsert_subscriber({"email": "a@x.com", "keywords": ["주식"],
+                              "send_hour": 18, "send_minute": 0}, now=self.now, path=self.path)
+        published = (self.now - timedelta(hours=1)).isoformat()
+        db.save_articles({"주식": [{"title": "속보", "link": "https://a/1",
+                                     "description": "", "published_at": published}]},
+                          now=self.now, path=self.path)
+        db.save_digest("주식", "짧게", "한국어",
+                       [{"headline": "속보", "topic": "T", "topic_summary": "S", "link": "https://a/1"}],
+                       now=self.now, path=self.path)
+        with mock.patch.object(pipeline.send_email, "send_email") as send:
+            pipeline.dispatch_one(self._sub(), now=self.now)
+            pipeline.dispatch_one(self._sub(), now=self.now + timedelta(seconds=5))
+        send.assert_called_once()
 
     def test_dispatch_skips_when_no_recent_digest(self):
         # 다이제스트가 하나도 없으면 발송하지 않는다
@@ -144,6 +177,55 @@ class TestBatchJobs(unittest.TestCase):
         en = db.fetch_digests_for_keywords(["주식"], "길게", "영어", now=self.now, path=self.path)
         self.assertEqual(len(ko["주식"]), 1)
         self.assertEqual(len(en["주식"]), 1)
+
+    def test_dispatch_one_sends_separate_weekly_trend_email_on_anchor(self):
+        # 이번 주 첫 발송 요일(매일 주기의 앵커=월요일)엔 일간 메일 + '별도의' 주간 트렌드 메일이 나간다.
+        monday = datetime(2026, 7, 6, 18, 0, 0, tzinfo=KST)
+        db.upsert_subscriber({"email": "a@x.com", "keywords": ["주식"],
+                              "send_hour": 18, "send_minute": 0}, now=monday, path=self.path)
+        published = (monday - timedelta(hours=1)).isoformat()
+        db.save_articles({"주식": [{"title": "속보", "link": "https://a/1",
+                                     "description": "", "published_at": published}]},
+                          now=monday, path=self.path)
+        db.save_digest("주식", "짧게", "한국어",
+                       [{"headline": "속보", "topic": "실적 발표", "topic_summary": "삼성 실적", "link": "https://a/1"}],
+                       now=monday, path=self.path)
+        with mock.patch.object(pipeline.send_email, "send_email") as send:
+            pipeline.dispatch_one(self._sub(), now=monday)
+        subjects = [c.kwargs["subject"] for c in send.call_args_list]
+        self.assertEqual(len(subjects), 2)  # 일간 + 주간(별도 메일)
+        weekly = next(c for c in send.call_args_list if "주간 트렌드" in c.kwargs["subject"])
+        body = weekly.kwargs["body_html"]
+        self.assertIn("실적 발표", body)        # 토픽
+        self.assertIn("삼성 실적", body)        # 요약
+        self.assertIn("관련 기사 보기", body)   # 관련 기사 링크
+
+    def test_dispatch_one_no_weekly_email_on_non_anchor_weekday(self):
+        # 화요일(self.now)엔 다이제스트가 있어도 일간만 나가고 주간 트렌드 메일은 안 나간다.
+        db.upsert_subscriber({"email": "a@x.com", "keywords": ["주식"],
+                              "send_hour": 18, "send_minute": 0}, now=self.now, path=self.path)
+        published = (self.now - timedelta(hours=1)).isoformat()
+        db.save_articles({"주식": [{"title": "속보", "link": "https://a/1",
+                                     "description": "", "published_at": published}]},
+                          now=self.now, path=self.path)
+        db.save_digest("주식", "짧게", "한국어",
+                       [{"headline": "속보", "topic": "실적 발표", "topic_summary": "S", "link": "https://a/1"}],
+                       now=self.now, path=self.path)
+        with mock.patch.object(pipeline.send_email, "send_email") as send:
+            pipeline.dispatch_one(self._sub(), now=self.now)
+        subjects = [c.kwargs["subject"] for c in send.call_args_list]
+        self.assertEqual(len(subjects), 1)
+        self.assertNotIn("주간 트렌드", subjects[0])
+
+    def test_weekly_trend_articles_for_excludes_keywords_without_history(self):
+        # config.DB_PATH는 setUp에서 이미 self.path로 패치돼 있다.
+        db.save_digest("주식", "짧게", "한국어",
+                       [{"headline": "H", "topic": "실적 발표", "topic_summary": "S", "link": "https://a/1"}],
+                       now=self.now, path=self.path)
+        trends = pipeline.weekly_trend_articles_for(["주식", "금리"], self.now)
+        self.assertEqual(list(trends.keys()), ["주식"])  # 이력 없는 "금리"는 빠짐
+        self.assertEqual(trends["주식"][0]["topic"], "실적 발표")
+        self.assertEqual(trends["주식"][0]["links"], ["https://a/1"])  # 관련 기사도 함께
 
     def test_summarize_job_stores_issue_topic_hierarchy(self):
         # 한 키워드에서 이슈 여러 개, 주제당 관련 기사 여러 개가 그대로 다이제스트에 반영되는지 확인

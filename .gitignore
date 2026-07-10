@@ -10,6 +10,7 @@ data/subscriptions.json
 data/newsletter.db
 data/*.db-journal
 data/*.db-wal
+/newsletter.db
 
 __pycache__/
 *.py[cod]
@@ -18,6 +19,7 @@ __pycache__/
 venv/
 env/
 legacy/
+future/
 
 .ipynb_checkpoints/
 
@@ -25,3 +27,19 @@ legacy/
 .idea/
 .DS_Store
 Thumbs.db
+
+PROGRESS.md
+DEMO_SCENARIOS.md
+
+# 개인 진단/스크래치 파일
+diag_out.txt
+diag_screenshot.png
+scratch_*.py
+템플릿 적용 결과 -*-.png
+
+# 설계 매트릭스 잔여물 · 데모가 매번 생성하는 HTML (런타임 생성물)
+_scen.json
+_scen_matrix.txt
+demo_output/
+# 데모 검증 데이터 덤프(스크린샷 아님)
+docs/demo_screenshots/*.json
