@@ -32,7 +32,10 @@ def _int_env(name, default):
         return default
 
 
-ACCESS_CODE_TTL_MINUTES = _int_env("ACCESS_CODE_TTL_MINUTES", 15)
+# 0/음수 TTL 은 코드를 발급 즉시(또는 과거로) 만료시켜 본인확인을 조용히 깨뜨리므로,
+# 양수가 아니면 기본값으로 되돌린다.
+_ttl = _int_env("ACCESS_CODE_TTL_MINUTES", 15)
+ACCESS_CODE_TTL_MINUTES = _ttl if _ttl > 0 else 15
 
 # 2-4. report.py 가 뉴스레터 메일 하단(구독취소/발송 설정)에 넣을 프론트엔드(Streamlit) 주소.
 FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "http://localhost:8501")
@@ -41,11 +44,22 @@ FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "http://localhost:8501")
 #      백엔드가 허용 출처를 열어줘야 한다. 지금 프론트(Streamlit)는 서버 대 서버 호출이라 실제로는
 #      필요 없지만, 나중을 대비해 미리 켜 둔다. .env의 CORS_ORIGINS(콤마 구분)로 조정하고, 기본값은
 #      로컬 React 개발 서버(CRA 3000 / Vite 5173)다.
-CORS_ORIGINS = [
+def _dedupe(seq):
+    """순서를 보존하며 중복을 제거한다."""
+    seen = set()
+    out = []
+    for x in seq:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+
+CORS_ORIGINS = _dedupe(
     o.strip()
     for o in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:5173").split(",")
     if o.strip()
-]
+)
 
 # 2-6. report.py 가 메일 상단/하단에 넣는 뉴스레터 표시 이름.
 NEWSLETTER_NAME = "트렌드 뉴스레터"
@@ -81,23 +95,6 @@ LANGUAGE = ["한국어", "영어"]
 
 # 3-2) 시간대 (KST)
 TIMEZONE = "Asia/Seoul"
-
-# 3-3) 긴급(속보) 감지 설정 — 시간이 아니라 '이벤트' 기반 트리거의 임계값
-#      결합 규칙: (A: 긴급 키워드) AND (B: 물량 급증)  또는  (강한 B 단독)
-MONITOR_INTERVAL_MINUTES = 10   # 감시 주기 & 급증 카운트 구간(분)
-MONITOR_DISPLAY = 100           # 급증 판정용 수집 건수 (네이버 max 100)
-
-# 긴급 메일 발송 후보 키워드 정의 (실제 뉴스 수집 시 추가/수정 필요)
-
-BREAKING_KEYWORDS = ["급락", "폭락", "상장폐지", "서킷브레이커", "디폴트", "횡령", "감자"]
-
-# 급등 기준 정의
-
-SURGE_BASELINE_WINDOWS = 6      # 기준선 계산에 쓸 과거 구간 수
-SURGE_FACTOR = 3.0              # 3배 이상이면 급증(B)
-STRONG_SURGE_FACTOR = 6.0       # 6배 이상이면 키워드(A) 없이도 발송
-SURGE_MIN_COUNT = 5             # 최소 표본(저물량 노이즈 방지)                
-EMERGENCY_COOLDOWN_MINUTES = 60 # 구독자당 긴급 재발송 최소 간격
 
 # 3-4) 외부 API 요청 안정성 (타임아웃/재시도)
 HTTP_TIMEOUT = (5, 10)   # (연결, 응답) 타임아웃 초 — 무한 대기 방지(스케줄러 멈춤 방지)

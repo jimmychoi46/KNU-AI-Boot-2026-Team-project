@@ -18,7 +18,6 @@ class Subscription:
     keywords: list = field(default_factory=list)
     send_hour: int = 0
     send_minute: int = 0
-    emergency_opt_in: bool = False
     name: str = ""
     frequency: str = config.FREQUENCY[0]
     summary_length: str = config.SUMMARY_LENGTH[0]
@@ -32,11 +31,16 @@ def _parse_send_time(row):
     (이때, send_hour/send_minute(정식 형식)이 모두 존재하지 않으면 ValueError 반환)
     """
     if "send_hour" in row and "send_minute" in row:
+        raw_hour, raw_minute = row["send_hour"], row["send_minute"]
+        # 소수(5.9 등)가 int()로 조용히 절삭돼 엉뚱한 시각으로 저장되는 것을 막는다(정수만 허용).
+        for raw in (raw_hour, raw_minute):
+            if isinstance(raw, float) and not raw.is_integer():
+                raise ValueError(f"발송 시각은 정수여야 합니다(소수 불가): {raw}")
         try:
-            hour = int(row["send_hour"])
-            minute = int(row["send_minute"])
+            hour = int(raw_hour)
+            minute = int(raw_minute)
         except (TypeError, ValueError) as exc:
-            raise ValueError(f"send_hour 혹은 send_minute 형식 오류: {exc}")
+            raise ValueError(f"send_hour 혹은 send_minute 형식 오류: {exc}") from exc
     else:
         raise ValueError("send_hour 혹은 send_minute 누락")
 
@@ -68,7 +72,7 @@ def normalize_email(email):
     'Alice@Example.com'과 'alice@example.com'을 서로 다른 구독자로 만들지 않기 위해
     조회/저장/URL 경로 파라미터 등 이메일이 등장하는 모든 지점에서 이 함수를 거친다.
     """
-    return str(email).strip().lower()
+    return str(email).strip().casefold()  # lower() 대신 casefold — 유니코드 케이스 폴딩(ß 등)까지 동일 취급
 
 
 def _clean_keywords(keywords):
@@ -98,7 +102,7 @@ def _from_row(row):
     단, 예외 가능성을 고려하여 frequency,summary_length, language의 경우 _pick()을 통해 구독자별 설정값이 존재할 경우 해당 설정값, 존재하지 않을 경우 미리 설정된 기본값으로 설정.
     """
     email = row.get("email")
-    if not email:
+    if not email or not str(email).strip():
         raise ValueError("email 누락")
     email = normalize_email(email)
     if not _looks_like_email(email):                                        # 이메일 형식 검증
@@ -141,13 +145,14 @@ def load_subscriptions_page(limit=-1, offset=0, path=None):
     load_subscriptions 와 동일한 검증(잘못된 행은 그 행만 건너뜀)이되 전체를 로드하지 않는다.
     limit=-1 이면 전체(오프셋만 적용).
     """
-    result = []
-    for i, row in enumerate(db.fetch_subscribers_page(limit, offset, path)):
-        try:
-            result.append(_from_row(row))
-        except (ValueError, AttributeError) as exc:
-            print(f"[구독 레코드 건너뜀] #{i}: {exc}")
-    return result
+    # 페이지네이션을 '검증 통과한 행' 기준으로 적용한다 — DB LIMIT/OFFSET 뒤에 파이썬에서 불량 행을
+    # 건너뛰면 페이지 창 안의 불량 행이 반환 개수를 줄이고 페이지 경계가 어긋난다(전체 개수와도 불일치).
+    # 구독자 규모가 작아 전체 검증 후 슬라이스해도 부담이 없다. limit<0(또는 None)이면 offset 이후 전체.
+    valid = load_subscriptions(path)
+    valid = valid[offset:] if offset else valid
+    if limit is not None and limit >= 0:
+        valid = valid[:limit]
+    return valid
 
 
 def get_subscription(email, path=None):
@@ -172,12 +177,24 @@ def save_subscription(record, path=None):
     # 쓰기 경로에서만 enum 값을 엄격 검증한다 — 잘못된 frequency/summary_length/language 를
     # 조용히 기본값으로 바꾸지 않고 거부(400). 읽기 경로(load_subscriptions→_from_row)는 여전히
     # _pick 으로 관대하게 처리해, 잘못된 기존 레코드 하나가 그 시각 전체 발송을 막지 않게 한다.
-    for field, allowed in (("frequency", config.FREQUENCY),
-                           ("summary_length", config.SUMMARY_LENGTH),
-                           ("language", config.LANGUAGE)):
-        value = record.get(field)
+    for field_name, allowed in (("frequency", config.FREQUENCY),
+                                ("summary_length", config.SUMMARY_LENGTH),
+                                ("language", config.LANGUAGE)):
+        value = record.get(field_name)
         if value is not None and value not in allowed:
-            raise ValueError(f"{field} 값이 허용 목록에 없습니다: {value!r}")
+            raise ValueError(f"{field_name} 값이 허용 목록에 없습니다: {value!r}")
+    # 길이 상한 — 무제한 저장(스토리지 증폭)을 막는다. PUT/import 는 rate limit 이 없어 특히 필요.
+    # 검사는 '저장되는 값'(정규화·strip·정리 후) 기준으로 한다 — 앞뒤 공백만으로 상한을 넘겨
+    # 정리 후엔 상한 이내인 값이 오거부되지 않도록(검증 기준과 저장 기준을 일치).
+    if len(normalize_email(record.get("email") or "")) > 254:
+        raise ValueError("이메일이 너무 깁니다(최대 254자)")
+    if len(str(record.get("name") or "").strip()) > 100:
+        raise ValueError("이름이 너무 깁니다(최대 100자)")
+    _kws = _clean_keywords(record.get("keywords"))
+    if len(_kws) > 50:
+        raise ValueError("키워드가 너무 많습니다(최대 50개)")
+    if any(len(k) > 50 for k in _kws):
+        raise ValueError("키워드가 너무 깁니다(각 최대 50자)")
     sub = _from_row(record)
     db.upsert_subscriber(
         {
@@ -239,12 +256,21 @@ def is_due(sub, now):
     """
     if not sub.confirmed:
         return False
-    # send_hour=24는 "자정(다음날 0시)"을 뜻하는 표시값(프론트의 "24:00" 옵션) —
-    # datetime.hour는 0~23뿐이라 그대로 비교하면 영원히 매칭되지 않으므로 0시로 정규화.
-    effective_hour = 0 if sub.send_hour == 24 else sub.send_hour
-    if not (effective_hour == now.hour and sub.send_minute == now.minute):
+    # 알 수 없는/손상된 주기는 '매일 발송'으로 오인하지 않고 발송 대상에서 제외한다
+    # (is_weekly_anchor 도 unknown→False 로 같은 방향). 정상 경로는 _from_row/_pick 이 주기를 보정한다.
+    weekdays = config.FREQUENCY_WEEKDAYS.get(sub.frequency)
+    if not weekdays:
         return False
-    weekdays = config.FREQUENCY_WEEKDAYS.get(sub.frequency, config.FREQUENCY_WEEKDAYS["매일"])
+    if sub.send_hour == 24:
+        # send_hour=24 = 그 발송 요일의 "자정(다음날 0시)"(프론트 "24:00" 옵션). 실제 발송은 다음날
+        # 00:00 이므로, 시각은 0시로 보되 발송 요일 판정도 하루 당겨(어제가 발송 요일인가) 본다.
+        # 매일은 매 요일 발송이라 무해하고, 매주(월)·주3회(월수금)는 라벨(요일 24:00)과 실제 발송이
+        # 다음날 00:00 로 어긋나던 것을 맞춘다. (datetime.hour 는 0~23 뿐이라 24 를 직접 비교 불가.)
+        if not (now.hour == 0 and now.minute == 0):
+            return False
+        return (now.weekday() - 1) % 7 in weekdays
+    if not (sub.send_hour == now.hour and sub.send_minute == now.minute):
+        return False
     return now.weekday() in weekdays
 
 
@@ -265,7 +291,10 @@ def is_weekly_anchor(sub, now):
     weekdays = config.FREQUENCY_WEEKDAYS.get(sub.frequency)
     if not weekdays:
         return False
-    return now.weekday() == min(weekdays)
+    # send_hour=24 는 '다음날 0시'에 발송되므로(is_due 와 동일하게 하루 당겨 판정), 주간 앵커 요일도
+    # 하루 당겨 봐야 24:00 구독자의 주간 트렌드 첨부 요일이 is_due 와 어긋나지 않는다.
+    effective_weekday = (now.weekday() - 1) % 7 if sub.send_hour == 24 else now.weekday()
+    return effective_weekday == min(weekdays)
 
 
 def send_window_hours(sub, now):

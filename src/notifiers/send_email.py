@@ -27,7 +27,18 @@ def send_email(to_email, subject, body_html):
 
 
 def send_to_recipients(recipients, subject, body_html):
-    """수신자 목록 전체에 동일한 메일을 발송."""
+    """수신자 목록 전체에 동일한 메일을 발송. 한 수신자 실패가 나머지 발송을 막지 않도록 격리한다.
+
+    returns: (성공 수, 실패 수).
+    """
+    sent = failed = 0
     for recipient in recipients:
-        send_email(recipient, subject, body_html)
-        print(f"[발송 완료] {recipient}")
+        try:
+            send_email(recipient, subject, body_html)
+        except Exception as exc:  # 한 명 실패(형식 오류·수신 거부 등)가 뒤 수신자 발송을 막지 않게 격리
+            failed += 1
+            print(f"[발송 실패] {recipient}: {exc}")
+        else:
+            sent += 1
+            print(f"[발송 완료] {recipient}")
+    return sent, failed

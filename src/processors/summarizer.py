@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 
 import openai
 
@@ -31,6 +32,24 @@ def _build_context(cleaned_items):
             original_links.append(link)
 
     return cleaned_text, original_links
+
+
+_NUM_RE = re.compile(r"\d[\d,.]*")
+
+
+def _ungrounded_numbers(text, src_digit_blob):
+    """text 의 숫자 토큰 중 원문 숫자열(src_digit_blob)에 없는 것 — 환각 수치 후보를 반환.
+
+    링크 무결성(_validate_links)이 '원문에 없는 링크'를 코드로 제거하듯, '원문에 없는 숫자'를
+    코드로 잡는 결정적 백스톱이다(프롬프트 규칙 5-1 과 이중 방어). 콤마는 무시하고(7,400==7400)
+    부분 문자열로 대조해, 원문에 명시된 수치는 통과시키고 지어낸 수치(예: 2.9%, 7400선)만 잡는다.
+    """
+    bad = []
+    for m in _NUM_RE.findall(text or ""):
+        norm = m.replace(",", "").strip(".")
+        if norm and norm not in src_digit_blob:
+            bad.append(m)
+    return bad
 
 
 def summarize(collected, summary_length, language):
@@ -65,6 +84,9 @@ def summarize(collected, summary_length, language):
 
     for query, items in collected.items():
         news_context, original_links = _build_context(items)
+        # 숫자 환각 방지용 원문 숫자열(제목+내용, 콤마·공백 제거) — 아래 행 생성 시 근거 대조에 쓴다.
+        src_digit_blob = re.sub(r"[,\s]", "", " ".join(
+            (it.get("title", "") + " " + it.get("description", "")) for it in items))
 
         if not news_context:
             logger.warning(f"'{query}' 쿼리에 대해 처리할 뉴스가 없습니다.")
@@ -87,10 +109,13 @@ def summarize(collected, summary_length, language):
         # QA 실패는 이 쿼리만 초안으로 대체하고 다음 쿼리로 넘어가게 한다. TypeError 를 빼면
         # 빈 응답 하나가 summarize() 밖으로 전파돼 그 호출의 나머지 쿼리·구독자 발송까지 막는다.
         try:
-            final_issues, qa_report = _qa_agent(draft_json, original_links, language, sentence_range)
+            final_issues, qa_report = _qa_agent(draft_json, original_links, language, sentence_range,
+                                                source_text=news_context)
         except (openai.OpenAIError, json.JSONDecodeError, TypeError) as e:
             logger.error(f"[QA Agent] '{query}' 실행 실패, 요약 Agent 초안으로 대체합니다: {_safe_error_str(e)}")
-            final_issues = draft_json.get("issues", [])
+            # draft_json 이 dict 가 아니면(모델이 JSON 배열 등을 반환) .get 이 AttributeError 를 던져
+            # 좁은 except 를 빠져나가 쿼리 격리가 깨진다 — dict 일 때만 issues 를 꺼낸다.
+            final_issues = draft_json.get("issues", []) if isinstance(draft_json, dict) else []
             qa_report = []
 
         if qa_report:
@@ -141,11 +166,19 @@ def summarize(collected, summary_length, language):
             # 버려지므로, 이슈의 모든 주제(topic)마다 유효 링크 전체를 행으로 펼친다
             # (db.group_digest_rows 가 같은 headline/topic 의 행들을 링크 리스트로 다시 묶는다).
             for topic in topics:
+                topic_summary = topic.get("summary") or ""
+                # 숫자 근거 백스톱 — 요약/제목에 원문에 없는 수치가 있으면 그 topic 을 버린다.
+                # 잘못된 숫자를 보내느니 그 항목을 누락하는 편이 낫다(가독성 기준 ①정확성: 자동 발송 금지).
+                ungrounded = _ungrounded_numbers(topic_summary + " " + headline, src_digit_blob)
+                if ungrounded:
+                    logger.warning(
+                        f"'{query}' - '{headline}' 요약에 원문에 없는 수치 {ungrounded} 감지 → 이 topic 제외(환각 방지)")
+                    continue
                 for link in (valid_links or [""]):
                     rows.append({
                         "headline": headline,
                         "topic": topic.get("subtitle") or "",
-                        "topic_summary": topic.get("summary") or "",
+                        "topic_summary": topic_summary,
                         "link": link,
                     })
 

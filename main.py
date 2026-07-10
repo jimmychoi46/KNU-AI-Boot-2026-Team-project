@@ -1,4 +1,3 @@
-# 속보 감시는 아직 미도입 기능이라 스케줄러에 등록하지 않는다 — future/breaking.py 참고.
 import pytz
 from apscheduler.schedulers.blocking import BlockingScheduler
 

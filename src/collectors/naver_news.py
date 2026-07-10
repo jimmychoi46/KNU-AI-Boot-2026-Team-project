@@ -79,7 +79,11 @@ def clean_text(text):
     2. 태그 제거
     """
     text = html.unescape(text or "")      # unescape(): HTML 엔터티 -> 일반 문자 변환(ex. &lt -> '<')
-    text = re.sub(r"<[^>]+>", "", text)   # HTML 태그 제거 (정규표현식 사용, <>로 둘러싼 문자열 감지 및 제거)
+    # 실제 HTML 태그(<b>·</b>·<script>·<!-- -->)만 제거한다 — 태그는 문자/슬래시/! 로 시작한다.
+    # <속보>·<단독> 같은 한국어 마커나 'A < B' 같은 리터럴 부등호(태그 아님)는 보존한다.
+    # 엔티티 인코딩된 태그(&lt;script&gt;)는 위 unescape 로 <script> 가 된 뒤 여기서 제거되고,
+    # 남는 위험 문자는 렌더 단계의 html.escape 가 최종 차단한다(방어 심층화).
+    text = re.sub(r"</?[A-Za-z!][^>]*>", "", text)
     return text.strip()                   # 공백 정리 후 반환
 
 
@@ -152,8 +156,7 @@ def collect(queries, display=NEWS_DISPLAY, now=None, dedupe_flag=True):
     파이프라인: 수집 → 정제(clean_item) → 기간 필터(최근 RECENCY_HOURS) → 중복 제거
     실패한 검색어는 빈 리스트로 채운다.
     now: 기간 필터 기준 시각(테스트용 주입). 미지정 시 현재 KST.
-    dedupe: 중복 제거 여부. 속보 감지의 '물량 급증' 카운트는 근접 중복까지
-            세어야 신호가 살아 있으므로 False 로 호출한다(기본 True).
+    dedupe_flag: 중복(같은 링크/정규화 제목) 제거 여부(기본 True).
     """
     if now is None:
         now = datetime.now(pytz.timezone(TIMEZONE))

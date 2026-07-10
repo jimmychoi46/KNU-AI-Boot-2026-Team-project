@@ -138,7 +138,9 @@ def _summarize_agent(news_context, language, sentence_range):
         "정해진 JSON 스키마에 맞춰 결과를 반환하는 것이다.\n\n"
 
         "[작성 규칙]\n"
-        "1. 이슈 그룹화: 동일한 사건이나 트렌드를 다룬 기사들은 하나의 이슈로 통합하라.\n"
+        "1. 이슈 그룹화: 동일한 사건이나 트렌드를 다룬 기사들은 하나의 이슈로 통합하라. "
+        "단, 한 이슈의 요약에는 그 이슈로 묶은 기사들의 사실만 담고, 서로 다른 사건·다른 기사의 내용을 "
+        "한 이슈에 섞지 마라(교차 오염 금지).\n"
         "2. 핵심 주제 분해: 통합된 이슈 안에서 실제로 구분되는 핵심 주제를 1~3개까지만 추출하라. "
         "주제 수를 억지로 맞추기 위해 내용을 쪼개거나 합치지 마라. 주제가 1개뿐이면 1개만 작성하라.\n"
         f"3. 문장 제한: 이슈 하나당 모든 topics의 summary를 합친 총 분량이 {sentence_range}가 되도록 하라. "
@@ -147,6 +149,10 @@ def _summarize_agent(news_context, language, sentence_range):
         "각 링크는 반드시 입력 데이터에 실제로 존재하는 링크만 사용하라. "
         "입력 데이터에 없는 링크를 지어내거나, 다른 기사의 링크와 교차 매칭하는 것은 절대 금지한다.\n"
         "5. 객관성 유지: 에디터의 주관이나 추측 없이 기사 본문의 팩트에만 기반하여 작성하라.\n"
+        "5-1. 수치 정확성(매우 중요): 비율(%)·지수 레벨·금액·수량·날짜 등 모든 숫자는 입력 데이터에 "
+        "명시적으로 있는 값만 그대로 사용하라. 원문에 없는 수치를 지어내거나 어림·추정·계산하지 마라. "
+        "확실한 숫자가 원문에 없으면 수치를 빼고 정성적으로만 서술하라(예: '상승했다', '확대됐다'). "
+        "잘못된 숫자는 링크 오류보다 치명적이다.\n"
         "6. 배치 순서: 이슈는 언급 빈도가 높은 순으로 최대 5개까지 배치하라.\n"
         f"7. 출력 언어: headline, subtitle, summary 등 모든 텍스트 내용은 반드시 '{language}'로 작성하라. "
         "단, articles의 링크는 원문 그대로 두어라.\n\n"
@@ -197,9 +203,11 @@ def _summarize_agent(news_context, language, sentence_range):
 # Agent 2 (편집/QA Agent): 요약 Agent의 초안을 2차 검토하여
 # 가독성 / 문장 길이 준수 / 객관성 위반 여부를 점검하고 필요 시 자동 수정
 # ----------------------------------------------------
-def _qa_agent(draft_json, original_links, language, sentence_range):
+def _qa_agent(draft_json, original_links, language, sentence_range, source_text=""):
     """
     draft_json: _summarize_agent가 만든 초안 JSON(dict)
+    source_text: 원문 기사 텍스트 — 요약이 원문 밖 사실을 지어냈는지(환각) 대조할 근거.
+                 예전엔 링크만 넘겨 QA가 사실 검증을 못 했다(의미 환각 무방비).
     반환: (수정된 JSON dict, qa_report dict)
     """
     qa_system_prompt = (
@@ -207,6 +215,9 @@ def _qa_agent(draft_json, original_links, language, sentence_range):
         "너의 임무는 이 초안을 검수하고, 문제가 있으면 직접 수정한 최종본을 반환하는 것이다.\n\n"
 
         "[검수 기준]\n"
+        "0. 사실 근거(최우선): 아래 <원문 기사>에서 확인되지 않는 사실·수치·주장·고유명사·정책명은 제거하라. "
+        "각 이슈의 요약은 그 이슈가 인용한 기사의 내용만 담아야 한다 — 다른 사건·다른 기사의 내용이 섞였으면"
+        "(교차 오염) 그 문장을 삭제하라. 원문에 없는 내용을 새로 만들거나 추정하지 마라. 이 기준을 최우선으로 적용한다.\n"
         f"1. 문장 길이 준수: 이슈 하나당 모든 topics의 summary를 합친 총 분량이 {sentence_range}를 "
         "벗어나면 문장을 줄이거나 늘려서 맞춰라.\n"
         "2. 객관성 위반 검사: 추측성 표현('~일 것으로 보인다', '~인 듯하다' 등 근거 없는 단정), "
@@ -219,6 +230,9 @@ def _qa_agent(draft_json, original_links, language, sentence_range):
 
         "[원본 링크 목록 - 이 목록에 없는 링크는 모두 무효 처리하라]\n"
         f"{json.dumps(original_links, ensure_ascii=False)}\n\n"
+
+        "[원문 기사 - 이 범위를 벗어난 사실·수치·주장은 모두 환각으로 보고 제거하라]\n"
+        f"{source_text}\n\n"
 
         "[출력 형식 - 매우 중요]\n"
         "다른 설명, 인사말, 코드블록(백틱) 없이 아래 스키마의 JSON 객체만 출력하라. "
@@ -313,7 +327,8 @@ def analyze_news(raw_json_data, language="한국어", length="중간"):
 
     # ---------------- Agent 2: 편집/QA ----------------
     try:
-        final_issues, qa_report = _qa_agent(draft_json, original_links, language, sentence_range)
+        final_issues, qa_report = _qa_agent(draft_json, original_links, language, sentence_range,
+                                            source_text=news_context)
     except (openai.OpenAIError, json.JSONDecodeError, TypeError) as e:
         # QA 호출 실패(API)·비유효 JSON·빈 응답(json.loads(None)의 TypeError)이면 초안으로
         # 대체(degrade)한다 — 그 외 코드 버그는 여기서 삼키지 않고 그대로 드러난다.

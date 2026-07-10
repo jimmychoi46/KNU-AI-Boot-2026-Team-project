@@ -10,6 +10,18 @@ from src.notifiers import send_email      # 백엔드
 from src.subscriptions import due_subscribers, is_weekly_anchor, load_subscriptions, send_window_hours
 
 
+def _daily_subject(sub):
+    """구독자의 실제 키워드로 일간 메일 제목을 만든다.
+
+    예전엔 dispatch_one 이 '금융'을 하드코딩하고 run_for_subscriber 는 키워드 리스트를 그대로 넣어
+    (['주식'] 처럼) 파이썬 표기가 제목에 새어 나왔다 — 둘 다 구독 키워드를 반영하도록 통일한다.
+    """
+    if not sub.keywords:
+        return "[데일리] 오늘의 뉴스 브리핑"
+    label = ", ".join(sub.keywords[:3]) + (" 외" if len(sub.keywords) > 3 else "")
+    return f"[데일리] 오늘의 {label} 뉴스 브리핑"
+
+
 def run_for_subscriber(sub):
     """구독자 sub 의 키워드로 뉴스를 만들어 그의 메일로 발송한다.
 
@@ -48,36 +60,10 @@ def run_for_subscriber(sub):
     # 4. 발송 (백엔드)
     send_email.send_email(
         sub.email,
-        subject=f"[데일리] 오늘의 {sub.keywords} 뉴스 브리핑",
+        subject=_daily_subject(sub),
         body_html=body_html,
     )
     print(f"[발송 완료] {sub.email} ({sub.send_hour:02d}:{sub.send_minute:02d})")
-
-
-def send_breaking_alert(sub, event):
-    """감지된 속보 event 를 구독자 sub 에게 시간과 무관하게 긴급 발송한다.
-
-    정기 발송과 동일한 요약·렌더링 파이프라인을 재사용하되, 제목만 [긴급]으로 구분한다.
-    args:
-        sub(Subscription): 수신자
-        event(dict): breaking.detect() 가 만든 이벤트 (keyword/items/... 포함)
-    """
-    if not sub.confirmed:
-        print(f"[긴급 발송 건너뜀] {sub.email}: 이메일 미확인")
-        return
-    try:
-        flat = summarizer.summarize({event["keyword"]: event["items"]}, sub.summary_length, sub.language)
-    except Exception as exc:
-        print(f"[긴급 발송 건너뜀] {sub.email}: 요약 실패 ({exc})")
-        return
-    digests = {kw: db.group_digest_rows(rows) for kw, rows in flat.items() if rows}
-    body_html = report.render(digests)
-    send_email.send_email(
-        sub.email,
-        subject=f"[긴급] {event['keyword']} 속보",
-        body_html=body_html,
-    )
-    print(f"[긴급 발송] {sub.email} ← {event['keyword']} (x{event['factor']})")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -280,7 +266,7 @@ def dispatch_one(sub, now=None, trend_cache=None):
         try:
             send_email.send_email(
                 sub.email,
-                subject="[데일리] 오늘의 금융 뉴스 브리핑",
+                subject=_daily_subject(sub),
                 body_html=report.render(digests, now=now),
             )
         except Exception as exc:

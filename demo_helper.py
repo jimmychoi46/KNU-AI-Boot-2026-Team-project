@@ -149,7 +149,7 @@ def cmd_bad_time(args):
             _p("                     (24:00 임시 구독자는 자동 정리함)")
     except requests.RequestException as exc:
         _p(f"[X] API 에 연결하지 못했습니다: {exc}")
-        _p(f"    -> 백엔드가 떠 있는지 확인하세요: uvicorn src.api:app --port 8000")
+        _p("    -> 백엔드가 떠 있는지 확인하세요: uvicorn src.api:app --port 8000")
         return
     _p("")
     _p("핵심: 프론트 드롭다운이 애초에 30분 단위만 주고(원천 차단), 그걸 우회해도 백엔드가 한 번 더 막습니다.")

@@ -32,7 +32,7 @@ def _pause(msg="계속하려면 Enter를 누르세요 (멈추려면 Ctrl+C)"):
         input(f"\n  >>{msg} ")
     except (EOFError, KeyboardInterrupt):
         print("\n중단했습니다. (발송 전이라면 메일은 나가지 않았습니다.)")
-        raise SystemExit(0)
+        raise SystemExit(0) from None
 
 
 def _check_env():

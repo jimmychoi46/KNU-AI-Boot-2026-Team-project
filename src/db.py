@@ -121,6 +121,10 @@ def _connect(path=None):
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 15000")
+    if path != ":memory:":
+        # WAL: 스케줄러 프로세스들 + API 서버가 한 파일을 공유하므로 쓰기가 읽기를 막지 않게 한다
+        # (기본 롤백저널은 쓰기 동안 읽기를 busy_timeout(최대 15초)까지 차단). WAL 은 파일 DB 에만 의미.
+        conn.execute("PRAGMA journal_mode = WAL")
     return conn
 
 
@@ -419,10 +423,14 @@ def confirm_subscriber(token, path=None):
         ).fetchone()
         if row is None:
             return None
-        conn.execute(
+        cur = conn.execute(
             "UPDATE subscribers SET confirmed = 1, confirm_token = NULL WHERE confirm_token = ?",
             (token,),
         )
+        if cur.rowcount != 1:
+            # 동시 확인 경쟁 — 다른 요청이 SELECT 와 UPDATE 사이에 같은 토큰을 먼저 소진했다.
+            # '내가 실제로 비운' 경우(rowcount==1)만 성공 처리해 1회용(이중 성공 방지)을 보장한다.
+            return None
     return row["email"]
 
 
@@ -456,7 +464,9 @@ def verify_access_code(email, code, now=None, path=None):
     if row is None or not row["access_code"]:
         return False
     try:
-        if not hmac.compare_digest(row["access_code"], code):
+        # 저장 코드는 대문자(token_hex(4).upper())라, 사용자가 소문자/공백을 섞어 입력해도
+        # 통과하도록 입력을 정규화(트림·대문자)한 뒤 상수시간 비교한다.
+        if not hmac.compare_digest(row["access_code"], str(code).strip().upper()):
             return False
     except TypeError:
         # 비ASCII 코드가 헤더로 오면 compare_digest 가 TypeError — 500 대신 인증 실패로 처리.

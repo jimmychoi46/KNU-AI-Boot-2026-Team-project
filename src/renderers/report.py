@@ -144,7 +144,7 @@ def render(digests, now=None):
             # 값이 JSON null(None)로 들어와도 html.escape(None) 크래시가 안 나도록 최후 방어선에서 정규화.
             headline = issue.get("headline") or ""
             highlight = highlight or headline
-            for topic in issue.get("topics", []):
+            for topic in issue.get("topics") or []:  # 값이 JSON null(None)이어도 안전(기본값은 키 부재 때만 적용됨)
                 links = topic.get("links") or []
                 items_html.append(_fill(_ITEM_BLOCK, {
                     "카테고리": html.escape(query or ""),

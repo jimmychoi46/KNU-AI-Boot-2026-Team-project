@@ -1,9 +1,10 @@
 import html
 import hmac
+import logging
 from contextlib import asynccontextmanager
 from urllib.parse import quote
 
-from fastapi import BackgroundTasks, Depends, FastAPI, Form, HTTPException, Query, Request, Response, Security
+from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Query, Request, Response, Security
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
@@ -15,12 +16,45 @@ from slowapi.util import get_remote_address
 from src import config, db, subscriptions
 from src.notifiers import send_email
 
+logger = logging.getLogger(__name__)
+
+
+def _mask_email(email):
+    """로그에 이메일 원문을 남기지 않도록 로컬파트를 가린다 (a***@example.com)."""
+    try:
+        local, _, domain = str(email).partition("@")
+        head = local[:1] if local else ""
+        return f"{head}***@{domain}" if domain else f"{head}***"
+    except Exception:
+        return "***"
+
+
 _admin_password_header = APIKeyHeader(name="X-Admin-Password", auto_error=False)
 _access_code_header = APIKeyHeader(name="X-Access-Code", auto_error=False)
 
 # 가입/인증코드 발송/본인확인 엔드포인트는 인증 없이 호출 가능해 무차별 대입(코드 브루트포스)·
 # 메일 폭탄의 표적이 된다. IP 기준으로 속도를 제한해 두 위험을 함께 줄인다.
-limiter = Limiter(key_func=get_remote_address)
+def _client_ip(request):
+    """rate limit 키용 클라이언트 IP. 리버스 프록시가 있으면 X-Forwarded-For 의 첫 IP(실제 클라이언트),
+    없으면 소켓 주소. (프록시 없는 로컬/직결에서는 소켓 주소 그대로.)"""
+    xff = request.headers.get("X-Forwarded-For")
+    if xff:
+        return xff.split(",")[0].strip()
+    return get_remote_address(request)
+
+
+def _rate_key_email(request):
+    """리소스(경로의 이메일) 기준 rate limit 키. Streamlit 이 백엔드를 서버-대-서버로 호출해 모든
+    최종 사용자 요청의 소켓 IP 가 동일해도, 특정 이메일에 대한 시도만 그 이메일 버킷으로 제한한다 —
+    (1) 남의 이메일 조회/수정/삭제·코드 요청이 사이트 전체 상한을 공유하지 않고, (2) 한 이메일의
+    인증 코드 브루트포스가 여러 IP 로 분산돼도 그 이메일 기준으로 묶여 막힌다. 경로에 이메일이
+    없으면 IP 로 폴백한다. 대소문자 변형으로 버킷을 우회(브루트포스를 여러 표기로 분산)하지
+    못하도록 정규화한 이메일을 키로 쓴다."""
+    email = request.path_params.get("email")
+    return subscriptions.normalize_email(email) if email else _client_ip(request)
+
+
+limiter = Limiter(key_func=_client_ip)
 
 
 def _is_admin(password):
@@ -170,7 +204,7 @@ def _send_confirmation_email(email):
     try:
         send_email.send_email(email, subject="[데일리 금융 뉴스] 구독 확인이 필요합니다", body_html=body_html)
     except Exception as exc:  # SMTP 실패가 회원가입 자체를 막지 않도록 격리
-        print(f"[확인 메일 발송 실패] {email}: {exc}")
+        logger.warning("[확인 메일 발송 실패] %s: %s", _mask_email(email), exc)
 
 
 def _send_access_code_email(email, code):
@@ -185,7 +219,7 @@ def _send_access_code_email(email, code):
     try:
         send_email.send_email(email, subject="[데일리 금융 뉴스] 본인 확인 코드", body_html=body_html)
     except Exception as exc:  # SMTP 실패가 요청 자체를 막지 않도록 격리
-        print(f"[본인 확인 코드 발송 실패] {email}: {exc}")
+        logger.warning("[본인 확인 코드 발송 실패] %s: %s", _mask_email(email), exc)
 
 
 def _confirm_result_page_html(success, email):
@@ -287,6 +321,34 @@ app.add_middleware(
 )
 
 
+class _NormalizeEmailPathMiddleware:
+    """rate limit 이 경로 대소문자로 버킷을 가르는 것을 막는다.
+
+    slowapi 는 (key_func 결과 + 요청 경로)로 버킷을 잡는다. 그래서 경로의 이메일이 대소문자만 달라도
+    (/subscribers/User@x.com vs /subscribers/user@x.com) 서로 다른 버킷이 되어, 인증 코드 브루트포스를
+    이메일의 대소문자 변형(같은 구독자로 정규화됨)으로 여러 버킷에 분산시킬 수 있다. /subscribers/{email}...
+    의 이메일 세그먼트를 정규화(소문자)한 경로로 라우팅해 버킷을 하나로 모은다 — 백엔드는 어차피 이메일을
+    정규화해 조회하므로 동작은 불변이다(소문자 특수문자 이메일은 정규화해도 그대로라 라우팅 영향 없음)."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http":
+            path = scope.get("path", "")
+            prefix = "/subscribers/"
+            if path.startswith(prefix) and len(path) > len(prefix):
+                seg, slash, tail = path[len(prefix):].partition("/")
+                norm = subscriptions.normalize_email(seg)
+                if norm != seg:
+                    scope = dict(scope)
+                    scope["path"] = prefix + norm + slash + tail
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(_NormalizeEmailPathMiddleware)
+
+
 @app.get("/health", summary="헬스체크(생존 확인)")
 def health():
     """백엔드가 살아있는지 확인하는 용도. 프론트·프록시·모니터가 부담 없이 부를 수 있게
@@ -349,7 +411,7 @@ def create_subscriber(request: Request, payload: SubscriberIn, background_tasks:
     try:
         sub = subscriptions.save_subscription(_record(payload, email))
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not sub.confirmed:
         background_tasks.add_task(_send_confirmation_email, sub.email)
     return _out(sub)
@@ -372,7 +434,7 @@ def confirm_prompt(token: str):
 def confirm_subscription(token: str = Form(...)):
     """확인 페이지의 버튼(POST /confirm)으로 구독을 확정한다(confirmed=True).
 
-    확정 전까지는 어떤 정기/속보 발송도 받지 않는다. 토큰은 1회용이라 확인 후 폐기되며,
+    확정 전까지는 어떤 정기 발송도 받지 않는다. 토큰은 1회용이라 확인 후 폐기되며,
     잘못됐거나 이미 쓰인 토큰이면 400.
     """
     email = db.confirm_subscriber(token)
@@ -400,13 +462,16 @@ def list_subscribers(
     전체 개수는 응답 헤더 X-Total-Count 로 함께 준다(React 가 페이지 수 계산에 쓸 수 있게).
     """
     require_admin(admin_password)
-    response.headers["X-Total-Count"] = str(db.count_subscribers())
-    subs = subscriptions.load_subscriptions_page(limit if limit is not None else -1, offset)
+    # 전체 개수·페이지 모두 '검증 통과한 구독자' 기준으로 맞춘다 — 불량 행이 있어도 X-Total-Count 와
+    # 반환 목록이 어긋나지 않게 한다(load_subscriptions_page 도 검증 후 슬라이스). 규모가 작아 부담 없음.
+    valid = subscriptions.load_subscriptions()
+    response.headers["X-Total-Count"] = str(len(valid))
+    subs = valid[offset:] if limit is None else valid[offset:offset + limit]
     return [_out(s) for s in subs]
 
 
 @app.post("/subscribers/{email}/access-code", status_code=202, summary="본인 확인 코드 발송")
-@limiter.limit("5/hour")
+@limiter.limit("5/hour", key_func=_rate_key_email)
 def request_access_code(request: Request, email: str, background_tasks: BackgroundTasks):
     """등록된 이메일이면 본인 확인 코드를 발송한다.
 
@@ -432,7 +497,7 @@ def request_access_code(request: Request, email: str, background_tasks: Backgrou
 @app.get(
     "/subscribers/{email}", response_model=SubscriberOut, summary="구독 정보 조회",
 )
-@limiter.limit("10/minute")
+@limiter.limit("10/minute", key_func=_rate_key_email)
 def get_subscriber(
     request: Request,
     email: str,
@@ -451,7 +516,7 @@ def get_subscriber(
 @app.put(
     "/subscribers/{email}", response_model=SubscriberOut, summary="구독자 정보 수정",
 )
-@limiter.limit("10/minute")
+@limiter.limit("10/minute", key_func=_rate_key_email)
 def update_subscriber(
     request: Request,
     email: str,
@@ -479,23 +544,30 @@ def update_subscriber(
         #   인증은 현재(old) 이메일 기준으로 이미 통과했고, 새 주소 가입은 POST 처럼 공개 동작이라
         #   권한 관점에서도 일관된다. 이미 '확인된' 새 주소가 있으면 신규가입과 동일하게 409.
         target = subscriptions.get_subscription(new_email)
-        if target is not None and target.confirmed:
-            raise HTTPException(status_code=409, detail=f"이미 구독 중인 이메일입니다: {new_email}")
+        if target is not None:
+            # 확인 여부와 무관하게 이미 존재하는 주소로는 변경 불가 — 미확인 대상을 덮어쓰면 타인의
+            # 대기 중(미확인) 가입이 소유권 확인 없이 파괴된다(보상 삭제까지 겹치면 완전 소실).
+            raise HTTPException(status_code=409, detail=f"이미 사용 중인 이메일입니다: {new_email}")
         try:
             new_sub = subscriptions.save_subscription(_record(payload, new_email))
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         # 기존 주소 삭제. 삭제(다른 트랜잭션)가 실패하면 방금 만든 새 주소를 되돌려(보상) 한 사용자가
         # 두 구독으로 갈라지는 최악을 막는다. (단일 트랜잭션 rename 이 아니라 완전한 원자성은 아니지만,
         # DELETE 를 try 밖에 두어 orphan 을 남기던 이전 버전보다 안전하다.)
         try:
             subscriptions.delete_subscription(email)
         except Exception as exc:
+            logger.exception("이메일 변경 실패(%s→%s): 기존 주소 삭제 오류",
+                             _mask_email(email), _mask_email(new_email))
             try:
                 subscriptions.delete_subscription(new_email)  # 보상: 새로 만든 것 롤백
             except Exception:
-                pass
-            raise HTTPException(status_code=500, detail="이메일 변경 중 오류가 발생했습니다. 다시 시도해주세요.")
+                logger.exception("이메일 변경 보상 실패: 새 주소(%s) 롤백 삭제 오류 — 수동 정리 필요",
+                                 _mask_email(new_email))
+            raise HTTPException(
+                status_code=500, detail="이메일 변경 중 오류가 발생했습니다. 다시 시도해주세요."
+            ) from exc
         if not new_sub.confirmed:
             # 확인 메일은 기존 주소 삭제가 성공한 뒤에만 보낸다(롤백될 주소로 메일 보내지 않도록).
             background_tasks.add_task(_send_confirmation_email, new_sub.email)
@@ -505,7 +577,7 @@ def update_subscriber(
     try:
         sub = subscriptions.save_subscription(_record(payload, email))
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     out = _out(sub)
     # PUT 은 이메일 확인 상태를 바꾸지 않는다 — save_subscription 이 돌려준 기본 False 가 아니라
     # 실제 저장돼 있는 confirmed 를 응답에 담아, 확인된 사용자가 미확인으로 잘못 보이지 않게 한다.
@@ -516,7 +588,7 @@ def update_subscriber(
 @app.delete(
     "/subscribers/{email}", status_code=204, summary="구독 취소",
 )
-@limiter.limit("10/minute")
+@limiter.limit("10/minute", key_func=_rate_key_email)
 def delete_subscriber(
     request: Request,
     email: str,

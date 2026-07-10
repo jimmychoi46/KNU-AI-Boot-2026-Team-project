@@ -16,9 +16,6 @@
 ```
 team_project/
 ├── main.py                     # 스케줄러 진입점 (수집/요약/발송 작업 등록)
-├── future/                     # 아직 미도입 기능 (스케줄러 미등록, 코드·테스트만 준비)
-│   ├── breaking.py              # 속보 감지 (급증/긴급 키워드 → 이벤트)
-│   └── test_breaking.py
 ├── data/
 │   ├── subscriptions.json       # 구독자 초기 시드용 JSON
 │   ├── subscriptions.example.json  # 예시
@@ -32,7 +29,7 @@ team_project/
 │   ├── renderers/report.py      # 렌더링 인터페이스
 │   ├── templates/daily_report.html  # 메일 HTML 템플릿
 │   ├── notifiers/send_email.py  # Gmail SMTP 발송
-│   ├── pipeline.py               # 배치 작업(collect/summarize/dispatch) + 속보 발송
+│   ├── pipeline.py               # 배치 작업(collect/summarize/dispatch)
 │   └── api.py                    # 구독자 REST API (FastAPI, Swagger /docs)
 └── requirements.txt / .env.example / .gitignore
 ```
@@ -217,7 +214,6 @@ uvicorn src.api:app --reload
 - 주간 트렌드(회고성)는 이 필터 대상이 아니다 — 이번 주 핵심을 다시 짚어주는 게 목적이라 의도적으로 중복을 허용한다.
 
 - **DB 스키마**: `subscribers`(구독자) · `articles`(정제 뉴스) → `digests`(조합별 요약 스냅샷; `latest_article_at`로 신선도 판정) → `digest_issues`(헤드라인) → `digest_topics`(주제+요약) → `digest_links`(관련 기사) · `sent_articles`(구독자별 재발송 방지 기록).
-- **속보 발송**(`send_breaking_alert`)은 시간과 무관한 즉시 발송이라 DB를 거치지 않고, 그때그때 동기적으로 요약·발송합니다. (현재는 틀만 잡힌 상태로, 기능 추가 시 반영 예정)
 
 </details>
 
@@ -240,7 +236,7 @@ uvicorn src.api:app --reload
 | `PUT` | `/subscribers/{email}` | 구독자 정보 수정(전체 교체) (관리자 또는 본인) | 인증 실패 401, 없으면 404, 값 오류 400 |
 | `DELETE` | `/subscribers/{email}` | 구독 취소 (관리자 또는 본인) | 인증 실패 401, 없으면 404 |
 
-- **이메일 확인**: `POST /subscribers`는 구독자를 `confirmed=False`로 저장하고, 확인 메일을 보냅니다. 그 링크(`GET /confirm`)를 열면 확인 안내 페이지만 뜨고(링크 사전열람만으론 확정되지 않게 함), 그 페이지의 버튼이 보내는 `POST /confirm`이 `confirmed=True`로 확정해 정기/속보 발송 대상이 됩니다. 토큰은 1회용이라 확인 후 폐기되며, 재사용하면 400을 반환합니다. 이미 확인된 이메일로 다시 신청하면 409지만, 아직 미확인인 이메일로 재신청하면 409 대신 확인 메일을 재전송합니다(같은 토큰 재사용).
+- **이메일 확인**: `POST /subscribers`는 구독자를 `confirmed=False`로 저장하고, 확인 메일을 보냅니다. 그 링크(`GET /confirm`)를 열면 확인 안내 페이지만 뜨고(링크 사전열람만으론 확정되지 않게 함), 그 페이지의 버튼이 보내는 `POST /confirm`이 `confirmed=True`로 확정해 정기 발송 대상이 됩니다. 토큰은 1회용이라 확인 후 폐기되며, 재사용하면 400을 반환합니다. 이미 확인된 이메일로 다시 신청하면 409지만, 아직 미확인인 이메일로 재신청하면 409 대신 확인 메일을 재전송합니다(같은 토큰 재사용).
 - **발송 시각 규칙**: `send_hour`는 0~24, `send_minute`은 30분 단위(0 또는 30)입니다. 어기면 400을 반환합니다(생략하면 필수값 누락으로 422).
 - **"없으면 404"의 예외**: 관리자(비밀번호)는 없는 이메일에 404를 받지만, 본인 확인 코드로 접근하면 없는 이메일은 소유 증명이 불가해 401이 됩니다(GET/PUT/DELETE `/subscribers/{email}` 공통).
 - **본문 예시**(POST/PUT): `{"email":"a@x.com","name":"홍길동","keywords":["주식","금리"],"send_hour":8,"send_minute":30}`
@@ -307,12 +303,3 @@ res = requests.get(
 
 </details>
 
----
-
-<details>
-<summary><b>🚧 알려진 제한사항 / 향후 확장</b></summary>
-
-- **속보(긴급) 감시는 아직 스케줄러에 등록되지 않았습니다.** `future/breaking.py`에 판정 로직만 존재합니다.
-
-
-</details>

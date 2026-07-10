@@ -3,14 +3,12 @@
     "email": "user1@example.com",
     "keywords": ["주식", "금리"],
     "send_hour": 8,
-    "send_minute": 0,
-    "emergency_opt_in": true
+    "send_minute": 0
   },
   {
     "email": "user2@example.com",
     "keywords": ["환율", "코인"],
     "send_hour": 18,
-    "send_minute": 30,
-    "emergency_opt_in": false
+    "send_minute": 30
   }
 ]
