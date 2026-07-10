@@ -1,39 +1,96 @@
-# KNU-AI-Boot-2026-Team-project
-강원대 2026 AI 계절학기(여름) 부트캠프 팀 프로젝트_5조
+# 📨 개인 맞춤형 AI 뉴스레터
+> 강원대학교 2026 AI 부트캠프(여름 계절학기) 팀 프로젝트 · 5조
 
-개인화 트렌드 뉴스레터 — 사용자가 고른 키워드의 뉴스를 수집·요약해 지정한 시각에 메일로 보내는 시스템입니다. 백엔드(수집·요약·발송·구독자 API)와 프론트엔드(구독 신청·관리 화면)를 한 브랜치에 합친 통합본입니다.
+내가 고른 키워드의 뉴스만 AI가 요약해서, 매일 정한 시각에 메일로 보내 주는 서비스입니다.
 
-## 구성
+---
 
-| 디렉터리 | 내용 | 실행 |
-|---|---|---|
-| `backend/` | FastAPI 구독자 API + 스케줄러(수집·요약·발송) + LLM 요약(`LLM_fn.py`) | `uvicorn src.api:app`, `python main.py` |
-| `frontend/` | Streamlit 구독 신청·대시보드·구독취소 화면 | `streamlit run app.py` |
-| `Newsletter_template/` | 이메일 템플릿 원본 + 요약 검증 기준·프롬프트 인젝션 방어 명세(기획 문서) | — |
+## 1. 주제 선정 이유
 
-프론트가 백엔드의 REST API를 호출하는 구조라, 두 서버를 각각 띄워야 합니다.
+뉴스는 넘치는데 정작 내 관심사만 골라 읽을 시간이 없습니다. 포털 첫 화면은 남이 정한 순서고, 흔한 뉴스레터는 남이 고른 주제입니다.
 
-## 실행
+그래서 **내가 고른 키워드만 · 내가 정한 시각에 · 3분이면 읽을 분량으로** 받아 보는 뉴스레터를 만들었습니다. 요약은 AI가 하되, 원문에 없는 내용을 지어내지 않도록 장치를 함께 뒀습니다.
 
-### 1) 백엔드
+## 2. 주요 기능
+
+- **키워드 맞춤** — 사람마다 관심 키워드·받는 시각·주기·요약 길이·언어를 따로 정함
+- **AI 요약 (멀티에이전트)** — 요약 에이전트가 초안을 만들고, 검수 에이전트가 원문과 맞춰 틀린 곳을 고침
+- **환각 막기** — 원문에 없는 숫자·내용이 요약에 섞이지 않게 함
+- **중복 안 보내기** — 이미 보낸 기사는 같은 사람에게 다시 보내지 않음
+- **주간 키워드** — 한 주에 한 번, 그 주의 핵심 키워드를 따로 메일로
+- **이메일·본인 확인** — 가입할 때 이메일을 확인하고, 조회·수정은 본인 확인 코드로 (남이 내 정보를 못 봄)
+- **관리자 화면** — 전체 구독자 보기·수정·삭제와 간단한 통계
+
+## 3. 시스템 환경 및 개발 툴
+
+| 구분 | 기술 |
+|---|---|
+| 언어 | Python |
+| 백엔드 | FastAPI · SQLite · APScheduler |
+| 프론트엔드 | Streamlit |
+| 뉴스 수집 | 네이버 오픈API (검색) |
+| AI 요약 | OpenRouter (GPT-4o) |
+| 메일 발송 | Gmail SMTP |
+
+## 4. 프로젝트 구성 및 실행
+
+| 폴더 | 내용 |
+|---|---|
+| `backend/` | 구독자 서버 · 발송 스케줄러 · AI 요약(`LLM_fn.py`) |
+| `frontend/` | 구독 신청 · 관리 화면 |
+| `Newsletter_template/` | 메일 디자인 · 기획 문서 |
+
+프론트가 백엔드를 불러 쓰는 구조라, 두 서버를 각각 띄웁니다.
 
 ```bash
-cd backend
-pip install -r requirements.txt
-cp .env.example .env      # SENDER / GOOGLE_APP_PASSWORD / NAVER_* / OPENAI_API_KEY / ADMIN_PASSWORD 채우기
-uvicorn src.api:app --reload   # 구독자 API — http://localhost:8000/docs
-python main.py                 # 수집·요약·발송 스케줄러 (별도 터미널)
-```
+# 백엔드
+cd backend && pip install -r requirements.txt
+cp .env.example .env      # NAVER_* / OPENAI_API_KEY / SENDER / GOOGLE_APP_PASSWORD / ADMIN_PASSWORD 채우기
+uvicorn src.api:app --reload   # http://localhost:8000/docs
+python main.py                 # 수집·요약·발송 (다른 터미널)
 
-### 2) 프론트엔드
-
-```bash
-cd frontend
-pip install -r requirements.txt
-cp .env.example .env                              # API_BASE_URL (기본 http://localhost:8000)
+# 프론트엔드
+cd frontend && pip install -r requirements.txt
+cp .env.example .env
 cp .streamlit/secrets.toml.example .streamlit/secrets.toml   # admin_password 채우기
 streamlit run app.py           # http://localhost:8501
 ```
 
-- 프론트의 `admin_password`(`.streamlit/secrets.toml`)는 백엔드 `.env`의 `ADMIN_PASSWORD`와 같아야 관리자 대시보드가 열립니다.
-- 세부 설계·API 계약·발송 파이프라인 설명은 각 디렉터리의 `README.md`에 있습니다.
+> 프론트의 `admin_password`는 백엔드 `.env`의 `ADMIN_PASSWORD`와 같아야 관리자 화면이 열립니다.
+
+## 5. 팀원 역할
+
+| 포지션 | 맡은 일 | 담당자 |
+|---|---|---|
+| LLM · Agent | 검색·요약·편집 멀티에이전트, 프롬프트 작성 | (이름) |
+| 백엔드 | 뉴스 수집, 발송 파이프라인, 구독자 서버·DB | (이름) |
+| 프론트엔드 | 구독·관리 화면, 백엔드 연동 | (이름) |
+| 기획 · 데이터 | 메일 디자인, 요약 품질 기준, 프롬프트 인젝션 방어 | (이름) |
+
+> AI 요약(`LLM_fn.py`)은 `backend/` 안에 있지만, LLM · Agent 담당이 맡은 별도 파트입니다.
+
+## 6. 개발 일정
+
+기간: **2026-07-07 ~ 07-14** (주말 제외)
+
+| 날짜 | 한 일 |
+|---|---|
+| 7/7 (화) | 프로젝트 시작 · 백엔드 기초 틀 · 이메일 발송 모듈 |
+| 7/8 (수) | 백엔드 개발 · LLM 요약 코드 · 프론트 백엔드 연동 · 유저 대시보드 |
+| 7/9 (목) | 본인 확인 코드 인증 · 이메일 템플릿 · 프론트–백엔드–LLM 연동 준비 |
+| 7/10 (금) | LLM 파트 통합(PR) · 주간 키워드·재발송 방지 기능 · 환각·요청 제한 점검 · backend·frontend dev 통합 |
+| 7/14 (화) | 발표 준비 · 발표 |
+
+## 7. 장단점 및 앞으로 (TODO)
+
+**장점**
+- 관심 키워드·받는 시각·주기·요약 길이·언어까지 사람마다 맞춤
+- 요약이 원문을 벗어나지 않고, 같은 기사를 중복해서 받지 않음
+- 주간 키워드로 그 주의 흐름을 따로 짚어 줌
+
+**아쉬운 점 · 앞으로**
+- **속보 알림** — 정해진 시각 외에도 큰 뉴스가 뜨면 바로 알려 주는 기능
+- 발송 요일이 정해져 있음 → 요일 고르는 화면 추가
+- 주간 키워드를 글자 그대로 세는 방식 → 뜻이 비슷한 주제끼리 묶기(클러스터링)
+- 지어낸 '내용' 환각은 아직 완전히는 못 막음 → 검증 더 붙이기
+- 지금은 각자 컴퓨터에서 실행 → 외부 서버에 올리기
