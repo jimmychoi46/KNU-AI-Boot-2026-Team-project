@@ -1,12 +1,12 @@
-# 🖥️ 백엔드 모듈 — 스크래퍼·스케줄러·구독자 API
+# 🖥️ 백엔드 — 스크래퍼·스케줄러·구독자 API
 
-> 담당: 백엔드 (스크래퍼·스케줄러·이메일 발송 서버·구독자 API)
+> 담당: 백엔드 (스크래퍼·스케줄러·이메일 발송 서버·구독자 API) <br>
 > 역할: 사용자가 직접 고른 키워드의 네이버 뉴스를 수집·정제하고, LLM/Agent가 만든 요약을
-> 각자 지정한 시각에 이메일로 자동 발송하는 파이프라인 전체를 구동합니다.
+> 각자 지정한 시각에 이메일로 자동 발송하는 파이프라인을 구동합니다.
 
-> **서비스 정의** — *금융에 관심은 있지만 뉴스 챙길 시간이 없는 직장인*을 위한, 아침 3분짜리 개인 금융 브리핑.
+> **서비스 정의** — *관심 있는 분야가 있지만 뉴스 챙길 시간은 없는 직장인*을 위한, 아침 3분짜리 개인 뉴스레터입니다. <br>
 > 내가 고른 키워드만 · 내가 고른 길이/언어로 · **같은 기사는 두 번 보내지 않고**(재발송 방지) 받아보고,
-> 주 1회는 "이번 주 핵심" 트렌드를 회고한다. 모든 개인화·정제가 "당신의 시간을 아낀다"는 한 축으로 정렬돼 있다.
+> 주 1회는 "이번 주 핵심" 트렌드를 회고합니다. 모든 개인화·정제가 "당신의 시간을 아낀다"는 한 축으로 정렬되어 있습니다.
 
 ---
 
@@ -20,21 +20,20 @@ team_project/
 │   ├── breaking.py              # 속보 감지 (급증/긴급 키워드 → 이벤트)
 │   └── test_breaking.py
 ├── data/
-│   ├── subscriptions.json       # [프론트] 구독자 초기 시드용 JSON (개인정보 → .gitignore)
-│   ├── subscriptions.example.json  # 예시 (커밋)
-│   └── newsletter.db            # 구독자/뉴스/요약 SQLite DB (런타임 생성 → .gitignore)
+│   ├── subscriptions.json       # 구독자 초기 시드용 JSON
+│   ├── subscriptions.example.json  # 예시
+│   └── newsletter.db            # 구독자/뉴스/요약 SQLite DB (실행 시 생성)
 ├── src/
 │   ├── config.py                # .env 로드 + 고정 상수(키워드 후보/시간대/DB 경로)
 │   ├── subscriptions.py         # 구독 모델·검증 + 저장/조회(save/delete/load)
 │   ├── db.py                    # SQLite 저장소 (subscribers/articles/digests 계층)
 │   ├── collectors/naver_news.py # 네이버 뉴스 수집
-│   ├── processors/summarizer.py # [LLM/Agent] 요약·편집 인터페이스
-│   ├── renderers/report.py      # [기획/데이터] 렌더링 인터페이스
-│   ├── templates/daily_report.html  # [기획/데이터] 메일 HTML 템플릿
+│   ├── processors/summarizer.py # 요약·편집 인터페이스
+│   ├── renderers/report.py      # 렌더링 인터페이스
+│   ├── templates/daily_report.html  # 메일 HTML 템플릿
 │   ├── notifiers/send_email.py  # Gmail SMTP 발송
 │   ├── pipeline.py               # 배치 작업(collect/summarize/dispatch) + 속보 발송
 │   └── api.py                    # 구독자 REST API (FastAPI, Swagger /docs)
-├── tests/                      # 단위 테스트
 └── requirements.txt / .env.example / .gitignore
 ```
 
@@ -50,7 +49,7 @@ team_project/
 | LLM/Agent | 검색·요약·편집 멀티에이전트 | `processors/summarizer.py` → `LLM_fn.py`(요약/QA Agent 구현체) |
 | **백엔드** | **스크래퍼·스케줄러·이메일 발송 서버·구독자 API** | **`collectors/`, `notifiers/`, `subscriptions.py`, `main.py`, `pipeline.py`, `config.py`, `api.py`** |
 | 프론트 | 구독 신청 페이지·키워드/발송시간 대시보드 | REST API(`api.py`) 호출 (`newsletter_project/utils.py`) |
-| 기획/데이터 | 요약 가독성 검증·템플릿 디자인·프롬프트 인젝션 방어 | `renderers/report.py`(아직 임시 스텁), `templates/` |
+| 기획/데이터 | 요약 가독성 검증·템플릿 디자인·프롬프트 인젝션 방어 | `renderers/report.py', `templates/` |
 
 **기술 스택**
 
@@ -60,7 +59,7 @@ team_project/
 | FastAPI | 백엔드 API 프레임워크| 
 | SQLite | 구독자 정보, 기사, 요약본 저장용 RDB| 
 | APScheduler | 이메일 발송 스케줄러| 
-|네이버 검색 API | 뉴스 기사 수집 |
+|네이버 오픈API (검색) | 뉴스 기사 수집 |
 | Gmail SMTP | 이메일 발송 |
 
 </details>
@@ -113,9 +112,6 @@ python main.py
 
 # 구독자 API 서버 (Swagger UI: http://localhost:8000/docs)
 uvicorn src.api:app --reload
-
-# 단위 테스트
-python -m pytest
 ```
 
 > ⚠️ 실행 시 한글이 깨져 보인다면, 인코딩 문제입니다. 발생 시 `chcp 65001` 또는 환경변수 `PYTHONUTF8=1` 설정을 통해 해결 가능합니다.
@@ -133,7 +129,7 @@ python -m pytest
 
 ### 발송 주기(frequency)
 
-`frequency`가 (a) 발송 요일과 (b) 창을 함께 결정합니다. 발송 요일의 경우 매주의 경우 월요일, 주 3회의 경우 월,수,금으로 고정되어 있습니다. (프론트에서 요일 선택 구현 시 변경 가능)
+`frequency`가 (a) 발송 요일과 (b) 기사 포함 기간을 함께 결정합니다. 발송 요일의 경우 매주의 경우 월요일, 주 3회의 경우 월,수,금으로 고정되어 있습니다. (프론트에서 요일 선택 구현 시 변경 가능)
 
 | frequency | 발송 요일 | 포함되는 기사(발송 시각 기준) |
 |---|---|---|
@@ -142,7 +138,7 @@ python -m pytest
 | 매주 | 월요일 | 168식 (7일) 이내 작성도니 기사 |
 
 - **발송 요일 필터링**(`is_due`): 그 주기의 발송 요일이 아니라면 발송 시각이 되어도 이메일이 발송되지 않도록 하여, 매주 혹은 주 3회로 설정한 구독자가 발송 요일이 아닐때 이메일을 수신하지 않도록 합니다.
-- **발송에 포함되는 기사 판정**(`send_window_hours`): 오늘부터 직전 발송 요일까지 지난 일수에 24를 곱해서, 이번 발송에 몇 시간 전 기사까지 포함할지를 계산합니다. `dispatch_one`이 이 창으로 DB 요약을 조회합니다.
+- **발송에 포함되는 기사 판정**(`send_window_hours`): 오늘부터 직전 발송 요일까지 지난 일수에 24를 곱해서, 이번 발송에 몇 시간 전 기사까지 포함할지를 계산합니다. `dispatch_one`이 이 포함 기간으로 DB 요약을 조회합니다.
 - 수집(`collect_job`)은 공용 DB이므로 가장 긴 발송 주기(매주=168h)까지 커버할 수 있도록 `RECENCY_HOURS = 24*7`로 넉넉히 설정합니다. 
 
 ### 구독자 저장
@@ -187,7 +183,7 @@ python -m pytest
 ③ dispatch_job() — 매 분
      due_subscribers(subs, now)                    → 지금 발송할 구독자(시:분 + 주기별 발송 요일)
      각 구독자마다 dispatch_one(sub):
-     hours = send_window_hours(sub, now)            → 주기별 창
+     hours = send_window_hours(sub, now)            → 주기별 포함 기간
      db.fetch_digests_for_keywords(sub.keywords, sub.summary_length, sub.language, hours=hours)
                                                       → {keyword: [{headline, topics: [{topic, topic_summary, links}]}, ...]}
      ├─ renderers.report.render(dict)         → html(str)
@@ -199,7 +195,7 @@ python -m pytest
 - **구독자별 요약 길이/언어**: `summary_length`(짧게/중간/길게)·`language`(한국어/영어)는 구독자마다 다릅니다. `summarize_job`은 실제 구독 중인 조합마다 별도로 요약본을 만듭니다.
 - **요약본은 매번 새 스냅샷으로 재생성되고, `DIGEST_RECENCY_HOURS`(기본 8일)만큼 이력이 보존됩니다**: 발송(`fetch_digests_for_keywords`)은 조합당 최신 스냅샷만 쓰지만, 주간 트렌드 키워드 집계(아래)가 지난 며칠치 이력을 훑어야 해서 즉시 지우지 않습니다. `save_digest()`가 같은 조합으로 다시 저장될 때 그 보존 기간보다 오래된 것만 정리하고(하위 issue/topic/link는 `FK ON DELETE CASCADE`), 갱신이 끊긴 조합의 이력은 `summarize_job` 실행마다 도는 `db.prune_old_digests()`가 정리합니다.
 - **`articles`도 자체 정리됩니다**: `collect_job`이 새 기사를 저장한 직후 `db.prune_old_articles()`를 호출해 `RECENCY_HOURS`(기본 7일)보다 오래된 기사를 지웁니다.
-- **발송은 '창 안에 실제 새 기사가 있을 때만'**: 다이제스트는 담은 기사 중 가장 최근 발행일을 `digests.latest_article_at`로 저장합니다. `fetch_digests_for_keywords`는 스냅샷 생성 시각(`created_at`, 30분마다 재요약돼 늘 최신)이 아니라 이 값이 구독자 창(일간 24h/매주 168h) 안인지로 신선도를 판정합니다 — 그래서 새 뉴스가 없으면 같은 옛 기사를 매일 "오늘의 뉴스"로 반복 발송하지 않습니다(예전 스냅샷은 값이 없어 `created_at`으로 폴백).
+- **발송은 '포함 기간 안에 실제 새 기사가 있을 때만'**: 다이제스트는 담은 기사 중 가장 최근 발행일을 `digests.latest_article_at`로 저장합니다. `fetch_digests_for_keywords`는 스냅샷 생성 시각(`created_at`, 30분마다 재요약돼 늘 최신)이 아니라 이 값이 구독자 포함 기간(일간 24h/매주 168h) 안인지로 신선도를 판정합니다 — 그래서 새 뉴스가 없으면 같은 옛 기사를 매일 "오늘의 뉴스"로 반복 발송하지 않습니다(예전 스냅샷은 값이 없어 `created_at`으로 폴백).
 
 ### 주간 트렌드 키워드
 
@@ -214,13 +210,13 @@ python -m pytest
 
 *"매일 새 것만"* — 구독자별로 이미 받은 기사를 기록해 두고 다음 발송에서 뺀다. 뺀 뒤 새 기사가 하나도 없으면 그 일간 메일은 아예 보내지 않는다.
 
-- `sent_articles(email, link, sent_at)` 원장: **발송에 성공한** 기사 링크를 구독자별로 기록(정규화된 링크). `SENT_ARTICLE_RETENTION_HOURS`(8일)만큼 보존해 매주 구독자도 지난주 기사가 이번 주에 다시 안 나가게 하고, `collect_job`이 주기적으로 정리한다.
+- `sent_articles(email, link, sent_at)` 발송 내역: **발송에 성공한** 기사 링크를 구독자별로 기록(정규화된 링크). `SENT_ARTICLE_RETENTION_HOURS`(8일)만큼 보존해 매주 구독자도 지난주 기사가 이번 주에 다시 안 나가게 하고, `collect_job`이 주기적으로 정리한다.
 - `db._normalize_link`: `utm_*`·`fbclid` 등 추적 파라미터만 제거하고 쿼리 파라미터를 정렬 — 추적 파라미터·파라미터 순서만 다른 같은 기사를 같은 것으로 본다. 네이버 `oid`/`aid` 같은 식별 쿼리는 보존해 서로 다른 기사가 뭉개지지 않는다.
 - `pipeline._drop_seen_articles`: `dispatch_one`이 발송 직전(claim·빈검사 **앞에서**) 이미 받은 링크를 뺀다. 한 topic 의 링크가 전부 이미 본 것이면 그 topic(=이미 읽은 뉴스)을 통째로 뺀다. topic 은 같은 사건을 다룬 기사 묶음이라 대표 링크뿐 아니라 그 묶음 링크 전부를 '받음'으로 기록한다(대표만 기록하면 같은 사건이 다음 날 다른 URL로 재발송됨). **일간 발송 성공 뒤에만** 기록하고, 기록만 실패해도(DB 락 등) 발송 자체는 성사로 처리한다.
-- 위 '창 안에 새 기사가 있을 때만'(`latest_article_at`)과 층이 다르다 — 그건 "이 다이제스트에 새 기사가 있나(전체)", 재발송 방지는 "그중 이 사람이 안 본 게 있나(개인)". 둘이 합쳐져 *새 것 없으면 메일도 안 온다*가 된다.
+- 위 '포함 기간 안에 새 기사가 있을 때만'(`latest_article_at`)과 층이 다르다 — 그건 "이 다이제스트에 새 기사가 있나(전체)", 재발송 방지는 "그중 이 사람이 안 본 게 있나(개인)". 둘이 합쳐져 *새 것 없으면 메일도 안 온다*가 된다.
 - 주간 트렌드(회고성)는 이 필터 대상이 아니다 — 이번 주 핵심을 다시 짚어주는 게 목적이라 의도적으로 중복을 허용한다.
 
-- **DB 스키마**: `subscribers`(구독자) · `articles`(정제 뉴스) → `digests`(조합별 요약 스냅샷; `latest_article_at`로 신선도 판정) → `digest_issues`(헤드라인) → `digest_topics`(주제+요약) → `digest_links`(관련 기사) · `sent_articles`(구독자별 재발송 방지 원장).
+- **DB 스키마**: `subscribers`(구독자) · `articles`(정제 뉴스) → `digests`(조합별 요약 스냅샷; `latest_article_at`로 신선도 판정) → `digest_issues`(헤드라인) → `digest_topics`(주제+요약) → `digest_links`(관련 기사) · `sent_articles`(구독자별 재발송 방지 기록).
 - **속보 발송**(`send_breaking_alert`)은 시간과 무관한 즉시 발송이라 DB를 거치지 않고, 그때그때 동기적으로 요약·발송합니다. (현재는 틀만 잡힌 상태로, 기능 추가 시 반영 예정)
 
 </details>
@@ -306,19 +302,6 @@ res = requests.get(
     headers={"X-Access-Code": code},
 )
 ```
-
-</details>
-
----
-
-<details>
-<summary><b>🧪 테스트 방법</b></summary>
-
-```bash
-python -m pytest
-```
-
-`tests/` 아래 단위 테스트가 구독자 CRUD, 이메일 확인, 관리자/본인 인증, 발송 요일 필터링, 요약본 자체 정리 등을 검증합니다.
 
 </details>
 

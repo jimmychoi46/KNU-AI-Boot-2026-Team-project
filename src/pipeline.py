@@ -94,7 +94,7 @@ def collect_job(now=None):
     않도록(digests 가 조합당 최신 1건만 남기는 것과 같은 이유의 자체 정리).
     returns: 새로 저장된 기사 수.
     """
-    db.prune_sent_articles(now=now)  # 재발송 방지 원장 정리는 구독자/키워드 유무와 무관하게 항상
+    db.prune_sent_articles(now=now)  # 재발송 방지 기록 정리는 구독자/키워드 유무와 무관하게 항상
     subs = [s for s in load_subscriptions() if s.confirmed]
     keywords = sorted({kw for s in subs for kw in s.keywords})
     if not keywords:
@@ -114,7 +114,7 @@ def summarize_job(now=None):
     기존 '기사 1건 = 요약 1건' 모델과 달리, LLM이 여러 기사를 묶어 이슈/주제로
     재구성하므로 '아직 요약 안 된 기사'라는 개념이 없다. 매 실행마다 그 키워드에
     보유 중인 기사 전체를 다시 넘겨 새 다이제스트 스냅샷을 만든다 — 오래된 스냅샷은
-    발송 시 창(window)으로 걸러진다(db.fetch_digests_for_keywords).
+    발송 시 포함 기간으로 걸러진다(db.fetch_digests_for_keywords).
     조합 수는 실제 구독 중인 (키워드, summary_length, language) 조합만큼 — 보통 적다.
     이메일 미확인 구독자는 제외한다.
     returns: 새로 생성된 다이제스트 수.
@@ -207,7 +207,7 @@ def _drop_seen_articles(digests, email):
     to_send 는 대표 링크(links[0])만이 아니라 그 topic 의 fresh 링크 '전부'를 담는다 — 하나의 topic 은
     같은 사건을 다룬 기사 묶음이라, 요약이 그 기사들을 다 소화해 전달한 것으로 보고 기사 단위로 '받음'
     처리한다(대표 링크만 기록하면 같은 사건이 다음 날 다른 멤버 URL로 재발송되어 '새 것만' 취지가 깨진다).
-    returns: (걸러진 digests, 이번에 새로 나갈 링크 리스트)  — 링크 리스트는 발송 성공 후 원장에 기록.
+    returns: (걸러진 digests, 이번에 새로 나갈 링크 리스트)  — 링크 리스트는 발송 성공 후 발송 내역에 기록.
     """
     all_links = [
         link for issues in digests.values() for issue in issues
@@ -242,7 +242,7 @@ def _drop_seen_articles(digests, email):
 def dispatch_one(sub, now=None, trend_cache=None):
     """구독자 한 명에게 DB의 최신 다이제스트(일간)와, 앵커일이면 주간 트렌드(별도 메일)를 발송한다.
 
-    되돌아보는 창(window)은 구독자 주기(frequency)에 따라 다르다
+    되돌아보는 기간은 구독자 주기(frequency)에 따라 다르다
     — 지난 발송 이후 소식을 커버하도록 send_window_hours 로 정한다.
     다이제스트는 구독자가 고른 summary_length/language 조합으로 생성된 것만 가져온다.
     발송일이 그 구독자의 '이번 주 첫 발송 요일'(is_weekly_anchor)이면 주기와 무관하게
@@ -291,7 +291,7 @@ def dispatch_one(sub, now=None, trend_cache=None):
             try:
                 db.record_sent_articles(sub.email, sent_links, now)
             except Exception as exc:
-                print(f"[원장 기록 실패] {sub.email}: {exc} (일부 기사가 다음 발송에서 재발송될 수 있음)")
+                print(f"[발송 내역 기록 실패] {sub.email}: {exc} (일부 기사가 다음 발송에서 재발송될 수 있음)")
             print(f"[발송 완료] {sub.email} ({sub.send_hour:02d}:{sub.send_minute:02d})")
     if trends:
         try:

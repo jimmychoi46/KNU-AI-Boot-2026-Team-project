@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS digests (
     summary_length    TEXT    NOT NULL,   -- config.SUMMARY_LENGTH 중 하나
     language          TEXT    NOT NULL,   -- config.LANGUAGE 중 하나
     created_at        TEXT    NOT NULL,
-    latest_article_at TEXT                -- 이 스냅샷이 담은 기사 중 가장 최근 발행일(발송 창 판정용)
+    latest_article_at TEXT                -- 이 스냅샷이 담은 기사 중 가장 최근 발행일(발송 포함 기간 판정용)
 );
 
 CREATE TABLE IF NOT EXISTS digest_issues (
@@ -91,7 +91,7 @@ CREATE INDEX IF NOT EXISTS idx_subscribers_confirm_token ON subscribers(confirm_
 CREATE INDEX IF NOT EXISTS idx_digest_issues_digest ON digest_issues(digest_id);
 CREATE INDEX IF NOT EXISTS idx_digest_topics_issue ON digest_topics(issue_id);
 CREATE INDEX IF NOT EXISTS idx_digests_created_at ON digests(created_at);
--- 재발송 방지 원장: 조회는 PK(email, link) 로 받고, 보존 기간 정리(sent_at 단독)는 이 인덱스로.
+-- 재발송 방지 기록: 조회는 PK(email, link) 로 받고, 보존 기간 정리(sent_at 단독)는 이 인덱스로.
 CREATE INDEX IF NOT EXISTS idx_sent_articles_sent_at ON sent_articles(sent_at);
 """
 
@@ -128,7 +128,7 @@ _COLUMN_MIGRATIONS = {
         "last_sent_at": "TEXT",  # 중복 발송 방지용 — 마지막으로 실제 발송을 마친 시각
     },
     "digests": {
-        "latest_article_at": "TEXT",  # 스냅샷이 담은 기사 중 가장 최근 발행일(발송 창 판정용)
+        "latest_article_at": "TEXT",  # 스냅샷이 담은 기사 중 가장 최근 발행일(발송 포함 기간 판정용)
     },
 }
 
@@ -431,7 +431,7 @@ def mark_confirmed(email, path=None):
 
 
 # ─────────────────────────────────────────────────────────────
-# 재발송 방지 원장 (sent_articles) — 구독자별로 이미 받은 기사를 다음 발송에서 뺀다
+# 재발송 방지 기록 (sent_articles) — 구독자별로 이미 받은 기사를 다음 발송에서 뺀다
 # ─────────────────────────────────────────────────────────────
 
 _TRACKING_PARAM_PREFIXES = ("utm_",)
@@ -462,9 +462,9 @@ def _normalize_link(link):
 
 
 def fetch_seen_links(email, links, path=None):
-    """email 이 이미 받은(원장에 있는) 링크만 골라 반환.
+    """email 이 이미 받은(발송 내역에 있는) 링크만 골라 반환.
 
-    입력 links(원본 문자열들) 중 정규화 형태가 원장에 있는 것들의 '원본'을 set 으로 돌려준다.
+    입력 links(원본 문자열들) 중 정규화 형태가 발송 내역에 있는 것들의 '원본'을 set 으로 돌려준다.
     """
     norm_map = {}
     for link in links:
@@ -485,15 +485,15 @@ def fetch_seen_links(email, links, path=None):
                 ).fetchall():
                     seen.update(norm_map.get(row["link"], []))
     except sqlite3.OperationalError as exc:
-        # 일시적 DB 락 등으로 원장 조회가 실패하면 '아무것도 안 본 것'으로 간주해 발송은 진행한다
+        # 일시적 DB 락 등으로 발송 내역 조회가 실패하면 '아무것도 안 본 것'으로 간주해 발송은 진행한다
         # — 그 틱을 통째로 놓치는 것보다 낫다(이미 본 기사가 한 번 더 나갈 수는 있으나 발송은 성사).
-        print(f"[원장 조회 경고] {email}: {exc} - 이번엔 재발송 방지를 건너뜁니다")
+        print(f"[발송 내역 조회 경고] {email}: {exc} - 이번엔 재발송 방지를 건너뜁니다")
         return set()
     return seen
 
 
 def record_sent_articles(email, links, now=None, path=None):
-    """email 에게 방금 발송한 기사 링크들을 원장에 기록(정규화 후, 이미 있으면 무시)."""
+    """email 에게 방금 발송한 기사 링크들을 발송 내역에 기록(정규화 후, 이미 있으면 무시)."""
     ts = _now(now).isoformat()
     norms = {_normalize_link(link) for link in links if link and _normalize_link(link)}
     if not norms:
@@ -506,7 +506,7 @@ def record_sent_articles(email, links, now=None, path=None):
 
 
 def prune_sent_articles(now=None, hours=None, path=None):
-    """보존 기간(SENT_ARTICLE_RETENTION_HOURS)보다 오래된 원장 항목을 정리. 삭제 수 반환."""
+    """보존 기간(SENT_ARTICLE_RETENTION_HOURS)보다 오래된 발송 내역 항목을 정리. 삭제 수 반환."""
     hours = config.SENT_ARTICLE_RETENTION_HOURS if hours is None else hours
     cutoff = (_now(now) - timedelta(hours=hours)).isoformat()
     with closing(_connect(path)) as conn, conn:
@@ -548,7 +548,7 @@ def save_articles(articles_by_keyword, now=None, path=None):
 def prune_old_articles(now=None, hours=None, path=None):
     """RECENCY_HOURS(또는 지정한 hours)보다 오래된 기사를 삭제한다.
 
-    fetch_articles_for_keyword 가 이 창보다 오래된 기사는 애초에 요약 대상으로 삼지
+    fetch_articles_for_keyword 가 이 기간보다 오래된 기사는 애초에 요약 대상으로 삼지
     않으므로, DB에 남겨둬도 다시 쓰일 일이 없다 — 저장 공간만 차지하는 죽은 데이터.
     collect_job 이 돌 때마다(수집 직후) 호출해 articles 테이블이 무한히 커지지 않게 한다
     (digests 가 조합당 최신 1건만 남기는 것과 같은 이유의 자체 정리).
@@ -643,7 +643,7 @@ def save_digest(keyword, summary_length, language, rows, now=None, latest_articl
     키워드 집계(get_top_topic_articles)가 지난 며칠치 이력을 훑어야 하므로 예전 스냅샷을 즉시
     지우지 않고 DIGEST_RECENCY_HOURS 만큼 보존한다 — 그보다 오래된 것만 이번에 정리한다
     (하위 issue/topic/link 는 FK ON DELETE CASCADE 로 함께 삭제).
-    latest_article_at: 이 스냅샷이 담은 기사 중 가장 최근 발행일(ISO). 발송 시 구독자 창 안에
+    latest_article_at: 이 스냅샷이 담은 기사 중 가장 최근 발행일(ISO). 발송 시 구독자 포함 기간 안에
         실제 새 기사가 있을 때만 보내는 판정에 쓴다 — 새 뉴스가 없으면 30분마다 재요약돼 스냅샷의
         created_at 은 늘 최신이라, 같은 옛 기사를 매일 반복 발송하는 걸 이 값으로 막는다.
     returns: 생성된 digest_id (rows 가 비었으면 None).
@@ -794,9 +794,9 @@ def fetch_digests_for_keywords(keywords, summary_length, language, now=None, hou
     """구독자 키워드 + (summary_length, language) 조합의 '최신' 다이제스트를 {keyword: [issue,...]} 로 반환.
 
     키워드마다 그 조합으로 만들어진 가장 최근 다이제스트 1개만 쓴다(그 이전 스냅샷은 버림).
-    신선도 판정은 다이제스트가 담은 '가장 최근 기사 발행일'(latest_article_at)이 hours 창 안인지로 한다
+    신선도 판정은 다이제스트가 담은 '가장 최근 기사 발행일'(latest_article_at)이 hours 기간 안인지로 한다
     — created_at(스냅샷 생성 시각)은 30분마다 재요약돼 늘 최신이라, 새 기사가 없어도 매번 통과해
-    같은 옛 기사를 반복 발송하게 된다. 창 안에 실제 새 기사가 없으면(=그 창의 갱신 없음) 제외한다.
+    같은 옛 기사를 반복 발송하게 된다. 기간 안에 실제 새 기사가 없으면(=그 기간의 갱신 없음) 제외한다.
     (예전 스냅샷은 latest_article_at 이 NULL 이라 created_at 으로 폴백 — 하위호환.)
     hours 미지정 시 config.SUMMARY_RECENCY_HOURS.
     """

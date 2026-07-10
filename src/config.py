@@ -40,7 +40,7 @@ SUGGESTED_KEYWORDS = ["주식", "금리", "환율", "코인"]
 FREQUENCY = ["매일", "주 3회", "매주"]
 # 발송 요일 (frequency별) — Python weekday(): 월=0 … 일=6
 #   프론트에 요일 선택 UI가 생기기 전까지 쓰는 고정 규칙(팀 합의로 변경 가능).
-#   '창(window)'과 '발송 여부'가 모두 이 요일에서 파생된다.
+#   '포함 기간'과 '발송 여부'가 모두 이 요일에서 파생된다.
 FREQUENCY_WEEKDAYS = {
     "매일": {0, 1, 2, 3, 4, 5, 6},
     "주 3회": {0, 2, 4},   # 월·수·금
@@ -51,7 +51,7 @@ SUMMARY_LENGTH = ["짧게", "중간", "길게"]
 # 검색 시 출력할 뉴스 수
 NEWS_DISPLAY = 5
 # 수집 기간 필터: 최근 몇 시간 이내 뉴스를 저장할지.
-#   발송 창은 구독자 주기별로 dispatch 에서 다시 자르므로, 수집은 '가장 긴 주기'(매주=168h)를
+#   발송 포함 기간은 구독자 주기별로 dispatch 에서 다시 자르므로, 수집은 '가장 긴 주기'(매주=168h)를
 #   커버하도록 넉넉히 둔다. (articles 는 30분마다 INSERT OR IGNORE 로 누적되므로 이력도 쌓인다)
 RECENCY_HOURS = 24 * 7
 # 언어: 기사 수집 언어? 요약 작성 언어? (현행 프론트에는 한국어, 영어만 존재)
@@ -102,7 +102,7 @@ SUMMARIZE_INTERVAL_MINUTES = 30    # 요약 처리 주기
 SUMMARY_RECENCY_HOURS = 24
 
 # 7. 주간 트렌드 키워드 — 다이제스트 이력을 얼마나 보존/집계할지
-#    보존 기간은 집계 창(TREND_LOOKBACK_HOURS, 7일)보다 하루 여유를 둬서, 정리 잡과
+#    보존 기간은 집계 기간(TREND_LOOKBACK_HOURS, 7일)보다 하루 여유를 둬서, 정리 잡과
 #    집계 잡의 실행 시점이 살짝 어긋나도 경계의 다이제스트가 이미 지워져 있는 일이 없게 한다.
 DIGEST_RECENCY_HOURS = 24 * 8
 TREND_LOOKBACK_HOURS = 24 * 7

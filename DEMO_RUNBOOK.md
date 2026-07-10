@@ -273,7 +273,3 @@ python demo_helper.py pipeline-live minjun@demo.com
 ```
 실제 네트워크 응답에 따라 수십 초 걸릴 수 있고, 대상 이메일 수신함에 실제 뉴스레터가 도착합니다.
 키가 하나라도 없으면 실패하므로, **불안하면 기본 데모 모드(`pipeline-demo`)** 를 쓰세요.
-
-## 부록 C. 근거 문서 (질문 대비)
-
-이 시연이 보여주는 동작들은 자동화 테스트로도 검증돼 있습니다 — 경계값·동시성·보안·예외 처리까지 [DYNAMIC_VERIFICATION.md](DYNAMIC_VERIFICATION.md) 에 관측 결과가 정리돼 있어, "이런 경우엔 어떻게 되나요?" 질문의 근거로 쓸 수 있습니다.
