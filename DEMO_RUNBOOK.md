@@ -104,10 +104,6 @@ python demo_helper.py list
 4. **성공 화면**: "구독이 확인되었습니다" 페이지. (`python demo_helper.py list` 로 `hong@demo.com` 이 `[v]`로 바뀐 것도 확인 가능)
 
 > 설계 메모(질문 대비): 확인 링크(GET)를 열어도 **버튼을 눌러야** 확정됩니다 — 메일 보안 프로그램이 링크를 미리 열어봐도 확정되지 않게 한 것.
-
-![구독 신청 접수](docs/demo_screenshots/rep1_1_subscribe_success.png)
-![확인 완료 화면](docs/demo_screenshots/rep1_2_confirm_page.png)
-
 ---
 
 ### 시연 2. 관리자 대시보드 — 조회·수정·삭제
@@ -119,8 +115,6 @@ python demo_helper.py list
 3. **성공 화면**: "관리자 인증 완료" + 통계(전체·확인 완료·최다 주기·최다 언어) + 구독자 목록 표.
 4. **수정**: "구독자 수정"에서 `minjun@demo.com` 선택 → 이름을 `김민준-수정됨` 으로 바꾸고 **"수정 저장"** → 표에 반영.
 5. **삭제**: "구독자 삭제"에서 `seoyeon@demo.com` 선택 → **"선택한 구독자 삭제"** → 목록에서 사라짐.
-
-![관리자 인증 + 목록](docs/demo_screenshots/verify_cross_admin_no_secrets.png)
 
 ---
 
@@ -140,8 +134,6 @@ python demo_helper.py list
 4. **성공 화면**: "본인 확인이 완료되었습니다" + 수정 폼.
 5. 이름을 `김민준(본인수정)` 으로 바꾸고 **"내 정보 수정 저장"** → 저장됨.
 
-![인증 코드 입력 후 본인 확인](docs/demo_screenshots/rep3_2_verified.png)
-
 ---
 
 ### 시연 4. 수집 → LLM 요약 → 발송 (핵심 가치사슬)
@@ -158,8 +150,6 @@ python demo_helper.py list
 3. `--open` 을 붙였으면 **두 개의 HTML**(일간 `newsletter_demo.html` + 주간 `weekly_trend_demo.html`)이 브라우저로 자동으로 열립니다(안 열리면 `demo_output/` 폴더에서 더블클릭).
 4. **성공 화면**: (1) 일간 뉴스레터, (2) 별도의 "THIS WEEK'S TREND" 메일 — 키워드(#금리/#주식)마다 토픽·요약·"관련 기사 보기" 링크가 들어 있음.
 
-  ![주간 트렌드 별도 메일 예시(키워드+요약+관련 기사)](docs/demo_screenshots/verify_weekly_trend_email.png)
-
 ---
 
 ### 시연 5. 엣지 — 이미 구독 중인 이메일 재신청
@@ -168,8 +158,6 @@ python demo_helper.py list
 
 1. `/subscribe` 에서 **이미 확인된** 이메일(시연1의 `hong@demo.com` 또는 `minjun@demo.com`)로 다시 신청.
 2. **성공 화면**: "이미 구독 중인 이메일입니다" 오류.
-
-![이미 구독 중 오류](docs/demo_screenshots/edge1_1_confirmed_resubmit_rejected.png)
 
 ---
 
@@ -183,8 +171,6 @@ python demo_helper.py list
    ```
 2. `/dashboard`(관리자 비번) 또는 터미널③ `python demo_helper.py list` 로 `messy@demo.com` 의 키워드 확인 → **`주식, 금리`** 로 정리됨.
 
-![지저분한 키워드 입력](docs/demo_screenshots/edge2_1_messy_keywords_input.png)
-
 ---
 
 ### 시연 7. 엣지 — 잘못된 발송시각은 백엔드가 막는다
@@ -197,8 +183,6 @@ python demo_helper.py list
    python demo_helper.py bad-time
    ```
 3. **성공 화면(터미널 출력)**: `send_minute=15 -> 400`(거부), `send_hour=25 -> 422`(거부), `send_hour=24 -> 201`(자정은 허용, 자동 정리).
-
-![드롭다운은 30분 단위만](docs/demo_screenshots/edge3_1_time_dropdown_30min_only.png)
 
 ---
 
