@@ -1,0 +1,146 @@
+<!--
+========================================================
+  트렌드 뉴스레터 이메일 템플릿 (v3 - 금융 테마)
+  - 딥 네이비 + 절제된 골드 액센트
+  - table 기반 / 인라인 스타일 / 프리헤더 / 다크모드
+  - {{ }} = 백엔드가 채울 자리표시자(placeholder)
+========================================================
+-->
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light dark">
+  <meta name="supported-color-schemes" content="light dark">
+  <title>트렌드 뉴스레터</title>
+  <style>
+    @media (prefers-color-scheme: dark) {
+      .bg-outer    { background-color:#0a0e14 !important; }
+      .bg-card     { background-color:#141a24 !important; }
+      .bg-subtle   { background-color:#0f141d !important; }
+      .text-title  { color:#f5f0e6 !important; }
+      .text-body   { color:#c0c7d1 !important; }
+      .text-muted  { color:#8792a3 !important; }
+      .divider     { border-top-color:#26303f !important; }
+      .tag         { background-color:#1f2937 !important; color:#c9a44c !important; }
+      .link-gold   { color:#c9a44c !important; }
+    }
+  </style>
+</head>
+<body class="bg-outer" style="margin:0; padding:0; background-color:#eceef1; font-family:'Apple SD Gothic Neo','Malgun Gothic','맑은 고딕',Arial,sans-serif;">
+
+  <!-- ===== 프리헤더: 받은편지함 미리보기 문구 ===== -->
+  <div style="display:none; max-height:0; overflow:hidden; opacity:0; font-size:1px; line-height:1px; color:#eceef1;">
+    {{프리헤더_문구}}
+    &zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;
+  </div>
+
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="bg-outer" style="background-color:#eceef1;">
+    <tr>
+      <td align="center" style="padding:24px 12px;">
+
+        <!-- 본문 카드 -->
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" class="bg-card" style="max-width:600px; width:100%; background-color:#ffffff; border-radius:10px; overflow:hidden;">
+
+          <!-- ===== 1. 헤더 ===== -->
+          <tr>
+            <td style="background-color:#0a2540; padding:30px 32px 26px 32px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="color:#ffffff; font-size:21px; font-weight:700; letter-spacing:-0.5px;">
+                    {{뉴스레터_이름}}
+                  </td>
+                  <td align="right" style="color:#8ba0bd; font-size:13px; letter-spacing:0.3px;">
+                    {{발송_날짜}}
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <!-- 헤더 하단 골드 라인 (프리미엄 포인트) -->
+          <tr>
+            <td style="height:3px; line-height:3px; font-size:0; background-color:#c9a44c;">&nbsp;</td>
+          </tr>
+
+          <!-- ===== 2. 오늘의 한 줄 요약 ===== -->
+          <tr>
+            <td style="padding:28px 32px 8px 32px;">
+              <p class="link-gold" style="margin:0 0 8px 0; color:#a6842f; font-size:12px; font-weight:700; letter-spacing:1.5px;">TODAY'S BRIEF</p>
+              <p class="text-title" style="margin:0; color:#0a2540; font-size:17px; line-height:1.55; font-weight:600;">
+                {{오늘의_핵심_요약}}
+              </p>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:22px 32px 4px 32px;">
+              <div class="divider" style="border-top:1px solid #e3e7ed; height:1px; line-height:1px; font-size:0;">&nbsp;</div>
+            </td>
+          </tr>
+
+          <!-- ===== 3. 뉴스 아이템 (반복 영역) ===== -->
+          <!-- [반복 시작] -->
+          <tr>
+            <td style="padding:20px 32px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td>
+                    <span class="tag" style="display:inline-block; background-color:#f4efe1; color:#a6842f; font-size:11px; font-weight:700; letter-spacing:0.5px; padding:5px 11px; border-radius:3px;">
+                      {{카테고리}}
+                    </span>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:13px 0 8px 0;">
+                    <a href="{{원문_링크}}" class="text-title" style="color:#0a2540; font-size:18px; font-weight:700; line-height:1.45; text-decoration:none;">
+                      {{뉴스_제목}}
+                    </a>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding-bottom:13px;">
+                    <p class="text-body" style="margin:0; color:#4a5568; font-size:15px; line-height:1.65;">
+                      {{요약_본문}}
+                    </p>
+                  </td>
+                </tr>
+                <tr>
+                  <td>
+                    <a href="{{원문_링크}}" class="link-gold" style="color:#a6842f; font-size:14px; font-weight:700; text-decoration:none;">
+                      원문 보기 &rarr;
+                    </a>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:0 32px;">
+              <div class="divider" style="border-top:1px solid #e3e7ed; height:1px; line-height:1px; font-size:0;">&nbsp;</div>
+            </td>
+          </tr>
+          <!-- [반복 끝] -->
+
+          <!-- ===== 4. 푸터 ===== -->
+          <tr>
+            <td class="bg-subtle" style="padding:28px 32px; background-color:#f7f8fa;">
+              <p class="text-muted" style="margin:0 0 8px 0; color:#8792a3; font-size:13px; line-height:1.6;">
+                이 메일은 {{뉴스레터_이름}} 구독자에게 발송되었습니다.
+              </p>
+              <p class="text-muted" style="margin:0; color:#8792a3; font-size:13px;">
+                <a href="{{구독취소_링크}}" style="color:#8792a3; text-decoration:underline;">구독 취소</a>
+                &nbsp;|&nbsp;
+                <a href="{{설정_링크}}" style="color:#8792a3; text-decoration:underline;">발송 설정</a>
+              </p>
+            </td>
+          </tr>
+
+        </table>
+
+      </td>
+    </tr>
+  </table>
+
+</body>
+</html>
