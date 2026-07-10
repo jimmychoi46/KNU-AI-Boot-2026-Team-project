@@ -1,9 +1,22 @@
-import pandas as pd
 import os
-import streamlit as st
+from urllib.parse import quote
 
-# 구독자 정보를 저장할 CSV 파일 경로
-FILE_PATH = "subscribers.csv"
+import pandas as pd
+import requests
+import streamlit as st
+from dotenv import load_dotenv
+
+load_dotenv()
+
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
+
+# 백엔드 GET /options 조회 실패 시의 폴백 기본값. 정상 경로에서는 get_options()가
+# 백엔드 config 값을 그대로 받아와 셀렉트박스를 채운다(하드코딩 드리프트 방지).
+FREQUENCY_OPTIONS = ["매일", "주 3회", "매주"]
+SUMMARY_LENGTH_OPTIONS = ["짧게", "중간", "길게"]
+LANGUAGE_OPTIONS = ["한국어", "영어"]
+
+_OPTIONS_CACHE = None
 
 
 def load_common_css():
@@ -324,115 +337,297 @@ def load_common_css():
     """, unsafe_allow_html=True)
 
 
+def _epath(email):
+    """이메일을 URL 경로에 안전하게 넣기 위한 인코딩.
+
+    quote(safe='')가 없으면 '#','?','%' 등이 프래그먼트/쿼리/퍼센트로 해석돼, 백엔드 정규식이
+    허용하는 특수문자 이메일이 등록은 되지만 조회/수정/삭제/코드요청에서 잘려 404가 된다.
+    """
+    return quote(str(email), safe="")
+
+
+def get_options():
+    """백엔드 GET /options 로 frequency/summary_length/language 선택지를 받는다(프로세스 1회 캐시).
+
+    백엔드 config 가 선택지를 바꾸면 프론트도 자동으로 따라가되(하드코딩 드리프트 제거),
+    백엔드가 잠깐 불가해도 폼은 뜨도록 실패 시 상단 상수로 폴백한다.
+    """
+    global _OPTIONS_CACHE
+    if _OPTIONS_CACHE is None:
+        fallback = {
+            "frequency": FREQUENCY_OPTIONS,
+            "summary_length": SUMMARY_LENGTH_OPTIONS,
+            "language": LANGUAGE_OPTIONS,
+        }
+        try:
+            resp = _request("GET", "/options")
+            data = resp.json() if resp.status_code == 200 else {}
+        except (requests.RequestException, ValueError):
+            data = {}
+        _OPTIONS_CACHE = {k: (data.get(k) or fallback[k]) for k in fallback}
+    return _OPTIONS_CACHE
+
+
 def generate_time_options():
     """
-    00:00부터 23:00까지 1시간 단위 시간 목록 생성
+    00:00부터 24:00까지 30분 단위 시간 목록 생성
     """
-    return [f"{hour:02d}:00" for hour in range(24)]
+    times = []
+
+    for hour in range(24):
+        times.append(f"{hour:02d}:00")
+        times.append(f"{hour:02d}:30")
+
+    times.append("24:00")
+    return times
 
 
-def load_subscribers():
-    """
-    CSV 파일에서 구독자 정보를 불러오는 함수
-    파일이 없으면 빈 데이터프레임 반환
-    """
-    if not os.path.exists(FILE_PATH):
-        return pd.DataFrame(columns=[
-            "name", "email", "keywords",
-            "send_time", "frequency",
-            "summary_length", "language"
-        ])
-    return pd.read_csv(FILE_PATH)
+def _split_keywords(keywords_str):
+    """'AI, Python, 스타트업' 같은 콤마 구분 문자열 -> 리스트."""
+    return [k.strip() for k in str(keywords_str).split(",") if k.strip()]
 
 
-def save_subscriber(name, email, keywords, send_time,
-                    frequency, summary_length, language):
+def _join_keywords(keywords_list):
+    """리스트 -> 콤마 구분 문자열 (입력 필드/표 표시용)."""
+    return ", ".join(keywords_list or [])
+
+
+def _parse_send_time(send_time):
+    """'HH:MM' -> (hour, minute). '24:00'은 hour=24, minute=0."""
+    hour_str, minute_str = str(send_time).split(":")
+    return int(hour_str), int(minute_str)
+
+
+def _format_send_time(hour, minute):
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _api_error_message(response):
+    """API 에러 응답에서 메시지를 뽑아낸다. 없으면 상태코드 기반 기본 메시지.
+
+    FastAPI 는 {"detail": ...}, slowapi 의 429 는 {"error": ...} 형태라 둘 다 확인한다.
     """
-    새 구독자 정보를 저장하는 함수
-    """
-    df = load_subscribers()
-    new_subscriber = {
-        "name": name,
-        "email": email,
-        "keywords": keywords,
-        "send_time": send_time,
-        "frequency": frequency,
-        "summary_length": summary_length,
-        "language": language
+    try:
+        body = response.json()
+        detail = body.get("detail") or body.get("error")
+    except (ValueError, AttributeError):
+        detail = None
+    if response.status_code == 429:
+        return detail or "요청이 너무 잦습니다. 잠시 후 다시 시도해주세요."
+    return detail or f"요청이 실패했습니다 (status={response.status_code})"
+
+
+def _request(method, path, **kwargs):
+    url = f"{API_BASE_URL}{path}"
+    return requests.request(method, url, timeout=10, **kwargs)
+
+
+def _auth_headers(admin_password=None, access_code=None):
+    """관리자 비밀번호/본인 확인 코드 중 있는 것만 헤더로 실어 보낸다."""
+    headers = {}
+    if admin_password:
+        headers["X-Admin-Password"] = admin_password
+    if access_code:
+        headers["X-Access-Code"] = access_code
+    return headers
+
+
+def _subscriber_to_dict(sub):
+    """API 응답(SubscriberOut) -> 프론트에서 쓰기 편한 dict (send_time 문자열 포함)."""
+    return {
+        "name": sub["name"],
+        "email": sub["email"],
+        "keywords": _join_keywords(sub["keywords"]),
+        "send_time": _format_send_time(sub["send_hour"], sub["send_minute"]),
+        "frequency": sub["frequency"],
+        "summary_length": sub["summary_length"],
+        "language": sub["language"],
+        "confirmed": sub["confirmed"],
     }
-    df = pd.concat([df, pd.DataFrame([new_subscriber])], ignore_index=True)
-    df.to_csv(FILE_PATH, index=False)
 
 
-def get_statistics():
+def load_subscribers(admin_password):
     """
-    구독자 통계 계산
+    관리자 전용 전체 구독자 목록 조회.
+
+    반환값: (DataFrame, 에러메시지) 튜플. 성공 시 에러메시지는 None,
+    실패(인증 실패 등) 시 DataFrame은 None.
     """
-    df = load_subscribers()
-    if df.empty:
+    try:
+        resp = _request("GET", "/subscribers", headers={"X-Admin-Password": admin_password})
+    except requests.RequestException as exc:
+        return None, f"서버에 연결할 수 없습니다: {exc}"
+
+    if resp.status_code != 200:
+        return None, _api_error_message(resp)
+
+    rows = [_subscriber_to_dict(s) for s in resp.json()]
+    columns = ["name", "email", "keywords", "send_time", "frequency", "summary_length", "language", "confirmed"]
+    return pd.DataFrame(rows, columns=columns), None
+
+
+def get_statistics(df):
+    """
+    구독자 통계 계산 (대시보드에서 불러온 DataFrame 기준).
+    """
+    if df is None or df.empty:
         return {
             "total_subscribers": 0,
+            "confirmed_count": 0,
             "most_common_frequency": "없음",
-            "most_common_language": "없음"
+            "most_common_language": "없음",
         }
+
     return {
         "total_subscribers": len(df),
+        "confirmed_count": int(df["confirmed"].sum()),
         "most_common_frequency": df["frequency"].mode()[0],
-        "most_common_language": df["language"].mode()[0]
+        "most_common_language": df["language"].mode()[0],
     }
 
 
-def delete_subscriber(email):
+def load_statistics(admin_password):
+    """백엔드 GET /subscribers/stats 로 통계를 받는다(관리자 전용). (dict, error|None) 반환.
+
+    프론트에서 목록을 세지 않고 백엔드 집계를 그대로 쓰는 경로. React 등 다른 프론트도
+    같은 계산을 다시 구현하지 않고 이 엔드포인트를 쓰면 된다. (Streamlit 대시보드는 이미
+    목록을 받아 get_statistics(df)로 계산하므로, 이 함수는 그 목록 없이 통계만 필요할 때용.)
     """
-    이메일 기준 구독자 삭제
-    """
-    df = load_subscribers()
-    if df.empty:
-        return False
-    if email not in df["email"].values:
-        return False
-    df = df[df["email"] != email]
-    df.to_csv(FILE_PATH, index=False)
-    return True
+    try:
+        resp = _request("GET", "/subscribers/stats", headers={"X-Admin-Password": admin_password})
+    except requests.RequestException as exc:
+        return None, f"서버에 연결할 수 없습니다: {exc}"
+    if resp.status_code != 200:
+        return None, _api_error_message(resp)
+    return resp.json(), None
 
 
-def unsubscribe_subscriber(email):
+def save_subscriber(name, email, keywords, send_time, frequency, summary_length, language):
     """
-    일반 사용자가 자기 이메일로 구독 취소
+    새 구독 신청. 성공/실패와 메시지를 (bool, str|None) 로 반환한다.
+    (백엔드가 confirmed=False로 저장하고 확인 메일을 보내므로, 성공해도 즉시 발송 대상은 아니다.)
     """
-    return delete_subscriber(email)
+    hour, minute = _parse_send_time(send_time)
+    payload = {
+        "email": email,
+        "name": name,
+        "keywords": _split_keywords(keywords),
+        "send_hour": hour,
+        "send_minute": minute,
+        "frequency": frequency,
+        "summary_length": summary_length,
+        "language": language,
+    }
+    try:
+        resp = _request("POST", "/subscribers", json=payload)
+    except requests.RequestException as exc:
+        return False, f"서버에 연결할 수 없습니다: {exc}"
+
+    if resp.status_code not in (200, 201):
+        return False, _api_error_message(resp)
+    return True, None
 
 
-def update_subscriber(old_email, name, new_email, keywords,
-                      send_time, frequency, summary_length, language):
-    """
-    기존 이메일(old_email)을 기준으로 구독자 정보 수정
-    """
-    df = load_subscribers()
-    if df.empty:
-        return False
-    if old_email not in df["email"].values:
-        return False
-    row_index = df[df["email"] == old_email].index[0]
-    df.at[row_index, "name"]           = name
-    df.at[row_index, "email"]          = new_email
-    df.at[row_index, "keywords"]       = keywords
-    df.at[row_index, "send_time"]      = send_time
-    df.at[row_index, "frequency"]      = frequency
-    df.at[row_index, "summary_length"] = summary_length
-    df.at[row_index, "language"]       = language
-    df.to_csv(FILE_PATH, index=False)
-    return True
+def request_access_code(email):
+    """본인 확인 코드를 이메일로 요청한다. (bool, 에러메시지) 반환."""
+    try:
+        resp = _request("POST", f"/subscribers/{_epath(email)}/access-code")
+    except requests.RequestException as exc:
+        return False, f"서버에 연결할 수 없습니다: {exc}"
+
+    if resp.status_code != 202:
+        return False, _api_error_message(resp)
+    return True, None
 
 
-def get_subscriber_by_email(email):
+def get_subscriber_by_email(email, access_code):
     """
-    이메일을 기준으로 특정 구독자 1명의 정보를 가져오는 함수
+    이메일 + 본인 확인 코드로 구독자 1명의 정보를 가져오는 함수.
+
+    매개변수:
+        email (str): 찾고 싶은 구독자의 이메일
+        access_code (str): request_access_code() 로 발급받은 본인 확인 코드
+
+    반환값: (subscriber|None, error|None) 튜플.
+        - 조회 성공: (dict, None)
+        - 코드 오류/만료/없음(401/403/404): (None, None) → 호출부가 '코드 오류'로 안내
+        - 서버 오류/연결 실패/429 등: (None, 에러메시지) → 호출부가 그 원인을 안내
+      '코드 오류'와 '서버 오류'를 구분해야, 백엔드가 다운/429일 때 정상 코드를 가진 사용자에게
+      '코드가 틀렸다'고 오인 안내하지 않는다.
     """
-    df = load_subscribers()
-    if df.empty:
-        return None
-    matched_rows = df[df["email"] == email]
-    if matched_rows.empty:
-        return None
-    return matched_rows.iloc[0]
+    try:
+        resp = _request("GET", f"/subscribers/{_epath(email)}",
+                        headers=_auth_headers(access_code=access_code))
+    except requests.RequestException as exc:
+        return None, f"서버에 연결할 수 없습니다: {exc}"
+
+    if resp.status_code == 200:
+        return _subscriber_to_dict(resp.json()), None
+    if resp.status_code in (401, 403, 404):
+        return None, None
+    return None, _api_error_message(resp)
+
+
+def delete_subscriber(email, admin_password=None, access_code=None):
+    """
+    이메일 기준 구독자 삭제. 관리자(admin_password) 또는 본인(access_code) 인증 필요.
+
+    반환값: (bool, error|None). 성공(204)=(True, None), 인증실패/없음(401/403/404)=(False, None),
+    서버오류/연결실패/429=(False, 에러메시지). 원인을 구분해 잘못된 안내를 막는다.
+    """
+    try:
+        resp = _request(
+            "DELETE", f"/subscribers/{_epath(email)}",
+            headers=_auth_headers(admin_password, access_code),
+        )
+    except requests.RequestException as exc:
+        return False, f"서버에 연결할 수 없습니다: {exc}"
+    if resp.status_code == 204:
+        return True, None
+    if resp.status_code in (401, 403, 404):
+        return False, None
+    return False, _api_error_message(resp)
+
+
+def unsubscribe_subscriber(email, access_code):
+    """
+    일반 사용자가 본인 확인 코드로 자기 이메일 구독을 취소. (bool, error|None) 반환.
+    """
+    return delete_subscriber(email, access_code=access_code)
+
+
+def update_subscriber(
+    old_email, name, new_email, keywords, send_time, frequency, summary_length, language,
+    admin_password=None, access_code=None,
+):
+    """
+    기존 이메일(old_email)을 기준으로 구독자 정보를 수정한다. 관리자 또는 본인 인증 필요.
+
+    이메일 변경(new_email != old_email)도 백엔드 PUT 이 처리한다 — 새 주소는 미확인
+    상태로 시작해 확인 메일을 새로 받는다(소유권이 바뀌므로). 프론트는 새 이메일을 본문에
+    실어 PUT 한 번만 보내면 된다(예전의 'POST 재가입 + DELETE 삭제' 우회 로직은 백엔드로 이동).
+
+    반환값: (bool, str|None) 성공 여부와 실패 시 에러 메시지.
+    """
+    hour, minute = _parse_send_time(send_time)
+    payload = {
+        "email": new_email,  # old_email 과 다르면 백엔드가 이메일 변경으로 처리(같거나 생략이면 제자리 수정)
+        "name": name,
+        "keywords": _split_keywords(keywords),
+        "send_hour": hour,
+        "send_minute": minute,
+        "frequency": frequency,
+        "summary_length": summary_length,
+        "language": language,
+    }
+    try:
+        resp = _request(
+            "PUT", f"/subscribers/{_epath(old_email)}", json=payload,
+            headers=_auth_headers(admin_password, access_code),
+        )
+    except requests.RequestException as exc:
+        return False, f"서버에 연결할 수 없습니다: {exc}"
+
+    if resp.status_code != 200:
+        return False, _api_error_message(resp)
+    return True, None
