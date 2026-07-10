@@ -44,6 +44,10 @@ def _parse_send_time(row):
         raise ValueError(f"발송 시각(시) 범위 오류: {hour} (0~24)")
     if minute not in (0, 30):
         raise ValueError(f"발송 시각(분)은 30분 단위(정각,30분)만 허용: {minute}")
+    if hour == 24 and minute != 0:
+        # 24시는 '자정(다음날 0시)' 표시값이라 24:00만 의미가 있다. 24:30은 is_due 가 0시로
+        # 정규화하면서 분은 30으로 남아 00:30에 오발송되므로 여기서 막는다.
+        raise ValueError("발송 시각 24시는 24:00(정각)만 허용합니다")
     return hour, minute
 
 
@@ -131,6 +135,21 @@ def load_subscriptions(path=None):
     return subscriptions
 
 
+def load_subscriptions_page(limit=-1, offset=0, path=None):
+    """DB 에서 한 페이지(LIMIT/OFFSET)만 읽어 검증된 Subscription 리스트로 반환.
+
+    load_subscriptions 와 동일한 검증(잘못된 행은 그 행만 건너뜀)이되 전체를 로드하지 않는다.
+    limit=-1 이면 전체(오프셋만 적용).
+    """
+    result = []
+    for i, row in enumerate(db.fetch_subscribers_page(limit, offset, path)):
+        try:
+            result.append(_from_row(row))
+        except (ValueError, AttributeError) as exc:
+            print(f"[구독 레코드 건너뜀] #{i}: {exc}")
+    return result
+
+
 def get_subscription(email, path=None):
     """이메일로 구독자 1명을 Subscription 으로 반환. 없거나 잘못된 행이면 None."""
     row = db.fetch_subscriber(email, path=path)
@@ -150,7 +169,16 @@ def save_subscription(record, path=None):
     저장은 검증·정규화된 값(후보에 없는 키워드 제거, 기본값 채움)으로 이뤄진다.
     returns: 저장된 Subscription.
     """
-    sub = _from_row(record) 
+    # 쓰기 경로에서만 enum 값을 엄격 검증한다 — 잘못된 frequency/summary_length/language 를
+    # 조용히 기본값으로 바꾸지 않고 거부(400). 읽기 경로(load_subscriptions→_from_row)는 여전히
+    # _pick 으로 관대하게 처리해, 잘못된 기존 레코드 하나가 그 시각 전체 발송을 막지 않게 한다.
+    for field, allowed in (("frequency", config.FREQUENCY),
+                           ("summary_length", config.SUMMARY_LENGTH),
+                           ("language", config.LANGUAGE)):
+        value = record.get(field)
+        if value is not None and value not in allowed:
+            raise ValueError(f"{field} 값이 허용 목록에 없습니다: {value!r}")
+    sub = _from_row(record)
     db.upsert_subscriber(
         {
             "email": sub.email,

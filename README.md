@@ -226,21 +226,23 @@ uvicorn src.api:app --reload
 <details>
 <summary><b>🔌 구독자 API 인터페이스 계약</b></summary>
 
-`uvicorn src.api:app --reload`로 띄우고 `/docs`의 Swagger UI에서 바로 테스트할 수 있습니다. 저장·검증은 `subscriptions.py`(→ `db.py`)를 재사용하며, 검증 실패는 400으로 응답합니다.
+`uvicorn src.api:app --reload`로 띄우고 `/docs`의 Swagger UI에서 바로 테스트할 수 있습니다. 저장·검증은 `subscriptions.py`(→ `db.py`)를 재사용하며, 검증 실패는 400으로 응답합니다. 모든 엔드포인트에 IP 기준 속도 제한이 걸려 있어, 초과하면 아래 표에 없는 **429**가 반환될 수 있습니다.
 
 | 메서드 | 경로 | 설명 | 실패 |
 |---|---|---|---|
 | `GET` | `/options` | frequency/summary_length/language 선택지 조회 (인증 불필요) | — |
 | `POST` | `/subscribers` | 신규 구독 (미확인 상태로 저장 + 확인 메일 발송) | 이미 확인된 이메일이면 409, 값 오류 400 |
-| `GET` | `/confirm?token=...` | 이메일 구독 확인 | 토큰 무효/재사용 시 400 |
+| `GET` | `/confirm?token=...` | 이메일 구독 확인 **안내 페이지** (상태 불변) | 토큰 무효/재사용 시 400 |
+| `POST` | `/confirm` | 안내 페이지 버튼이 폼(`token`)으로 확정 → `confirmed=True` | 토큰 무효/재사용 시 400 |
 | `GET` | `/subscribers` | 전체 구독자 조회 (관리자 전용) | 인증 실패 401 |
-| `POST` | `/subscribers/{email}/access-code` | 본인 확인 코드 이메일 발송 (셀프서비스 전 필요) | 없는 이메일이면 404 |
+| `POST` | `/subscribers/{email}/access-code` | 본인 확인 코드 이메일 발송 (셀프서비스 전 필요) | 없는 이메일이어도 항상 202 (존재 여부 비노출) |
 | `GET` | `/subscribers/{email}` | 구독 정보 조회 (관리자 또는 본인) | 인증 실패 401, 없으면 404 |
 | `PUT` | `/subscribers/{email}` | 구독자 정보 수정(전체 교체) (관리자 또는 본인) | 인증 실패 401, 없으면 404, 값 오류 400 |
 | `DELETE` | `/subscribers/{email}` | 구독 취소 (관리자 또는 본인) | 인증 실패 401, 없으면 404 |
 
-- **이메일 확인**: `POST /subscribers`는 구독자를 `confirmed=False`로 저장하고, 확인 메일을 보냅니다. 그 링크를 눌러야(`GET /confirm`) `confirmed=True`가 되고, 그래야 정기/속보 발송 대상이 됩니다. 토큰은 1회용이라 확인 후 폐기되며, 재사용하면 400을 반환합니다. 이미 확인된 이메일로 다시 신청하면 409지만, 아직 미확인인 이메일로 재신청하면 409 대신 확인 메일을 재전송합니다(같은 토큰 재사용).
-- **발송 시각 규칙**: `send_hour`는 0~24, `send_minute`은 30분 단위(0 또는 30)입니다. 어기면 400을 반환합니다.
+- **이메일 확인**: `POST /subscribers`는 구독자를 `confirmed=False`로 저장하고, 확인 메일을 보냅니다. 그 링크(`GET /confirm`)를 열면 확인 안내 페이지만 뜨고(링크 사전열람만으론 확정되지 않게 함), 그 페이지의 버튼이 보내는 `POST /confirm`이 `confirmed=True`로 확정해 정기/속보 발송 대상이 됩니다. 토큰은 1회용이라 확인 후 폐기되며, 재사용하면 400을 반환합니다. 이미 확인된 이메일로 다시 신청하면 409지만, 아직 미확인인 이메일로 재신청하면 409 대신 확인 메일을 재전송합니다(같은 토큰 재사용).
+- **발송 시각 규칙**: `send_hour`는 0~24, `send_minute`은 30분 단위(0 또는 30)입니다. 어기면 400을 반환합니다(생략하면 필수값 누락으로 422).
+- **"없으면 404"의 예외**: 관리자(비밀번호)는 없는 이메일에 404를 받지만, 본인 확인 코드로 접근하면 없는 이메일은 소유 증명이 불가해 401이 됩니다(GET/PUT/DELETE `/subscribers/{email}` 공통).
 - **본문 예시**(POST/PUT): `{"email":"a@x.com","name":"홍길동","keywords":["주식","금리"],"send_hour":8,"send_minute":30}`
 - `keywords`는 자유 입력입니다. 저장 시 공백/빈값/중복만 정리되고, 후보 제한은 없습니다.
 - **`GET /options`**: 프론트가 `frequency`/`summary_length`/`language` 드롭다운을 백엔드 `config.py` 값과 항상 일치하게 채울 수 있도록 제공합니다. 이 값들을 프론트가 직접 하드코딩하면, 나중에 백엔드에서 선택지가 바뀌었을 때 프론트가 조용히 어긋나게 됩니다.

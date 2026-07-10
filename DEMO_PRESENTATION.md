@@ -33,6 +33,4 @@
 - `/subscribe` "받는 시간" 드롭다운 → 30분 단위 값만 있음.
 - `demo_helper.py bad-time` → `send_minute=15 → 400`, `send_hour=25 → 422`, `send_hour=24 → 201`.
 
-## 8. ⭐ 차별점 — 재발송 방지 (같은 기사 두 번 안 보냄)
-- `demo_helper.py norepeat-demo <이메일> --open` → HTML 2개 열림: 1일차 뉴스 3건 vs 2일차 **새 기사 1건만**(어제 본 건 빠짐), 3일차 새 것 없어 `발송 안 함`.
-- 서사: "시간 없는 직장인을 위해 매일 새 것만."
+

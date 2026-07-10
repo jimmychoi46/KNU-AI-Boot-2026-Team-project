@@ -3,11 +3,12 @@ import hmac
 from contextlib import asynccontextmanager
 from urllib.parse import quote
 
-from fastapi import BackgroundTasks, Depends, FastAPI, Form, HTTPException, Request, Security
-from fastapi.responses import HTMLResponse
+from fastapi import BackgroundTasks, Depends, FastAPI, Form, HTTPException, Query, Request, Response, Security
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
@@ -35,7 +36,7 @@ def _is_admin(password):
 
 
 def require_admin(password: str | None = Security(_admin_password_header)):
-    """GET /subscribers(관리자 전용)에 붙이는 인증 의존성.
+    """GET /subscribers(관리자 전용) 인증 검사 헬퍼. dependencies= 로 걸지 않고 엔드포인트 본문에서 직접 호출한다(이유는 list_subscribers docstring 참고 — @limiter.limit 이 먼저 집계해야 함).
 
     설정된 관리자 비밀번호와 일치하는 값이 X-Admin-Password 헤더로 와야 통과한다.
     비밀번호 비교에 hmac.compare_digest 를 써서 타이밍 공격을 막는다.
@@ -52,7 +53,7 @@ def _check_admin_or_owner(email, admin_password, access_code):
     FastAPI 의 dependencies=[] 가 아니라 엔드포인트 본문 안에서 호출한다 — 그래야
     @limiter.limit 데코레이터가 요청을 먼저 집계한 뒤 이 검사가 돈다. dependencies 로
     걸면 401 이 데코레이터보다 먼저 나서 실패 요청이 rate limit 에 집계되지 않고,
-    본인 확인 코드(6자리 hex) 무차별 대입을 사실상 막지 못한다.
+    본인 확인 코드(8자리 hex, 32비트) 무차별 대입을 사실상 막지 못한다.
     """
     if _is_admin(admin_password):
         return
@@ -71,19 +72,25 @@ class SubscriberIn(BaseModel):
         description="관심 키워드 (자유 입력). 저장 시 공백/빈값/중복만 정리됨",
         examples=[["주식", "금리"]],
     )
-    send_hour: int | None = Field(None, ge=0, le=24, description="발송 시각(시) 0~24")
-    send_minute: int | None = Field(None, description="발송 시각(분) — 0 또는 30")
+    send_hour: int = Field(..., description="발송 시각(시) 0~24 (범위 밖이면 400)")
+    send_minute: int = Field(..., description="발송 시각(분) 0 또는 30 (그 외 400)")
     frequency: str | None = Field(None, description="발송 주기 (config.FREQUENCY, 미지정 시 기본값)")
     summary_length: str | None = Field(None, description="요약 길이 (config.SUMMARY_LENGTH, 미지정 시 기본값)")
     language: str | None = Field(None, description="언어 (config.LANGUAGE, 미지정 시 기본값)")
 
 
 class SubscriberUpdate(BaseModel):
-    """구독자 수정(PUT) 요청 본문: 이메일은 경로에서 받으므로 본문엔 없음(전체 교체)."""
+    """구독자 수정(PUT) 요청 본문. 경로의 이메일이 '현재' 식별자다.
+
+    email 을 넣고 그 값이 현재 이메일과 다르면 '이메일 변경'으로 처리한다 — 새 주소로
+    (미확인) 재가입 + 확인 메일 발송 + 기존 주소 삭제(POST 신규가입과 같은 규칙).
+    email 을 생략하거나 현재와 같으면 제자리 수정(전체 교체)이다.
+    """
+    email: str | None = Field(None, description="바꿀 새 이메일(생략/현재와 동일 시 이메일 변경 없음)")
     name: str = ""
     keywords: list[str] = Field(default_factory=list)
-    send_hour: int | None = Field(None, ge=0, le=24)
-    send_minute: int | None = Field(None, description="0 또는 30")
+    send_hour: int = Field(..., description="발송 시각(시) 0~24 (범위 밖이면 400)")
+    send_minute: int = Field(..., description="발송 시각(분) 0 또는 30 (그 외 400)")
     frequency: str | None = None
     summary_length: str | None = None
     language: str | None = None
@@ -240,9 +247,52 @@ app = FastAPI(
     version="1.0.0",
     description="데일리 금융 뉴스 브리핑 — 구독자 관리 API",
     lifespan=lifespan,
+    # /docs 하단 'Schemas' 목록을 접는다(-1). 거기 모이는 FastAPI 자동 생성 스키마
+    # (HTTPValidationError 등)를 숨겨 화면을 정리 — 각 엔드포인트 안의 요청/응답 예시는 그대로다.
+    swagger_ui_parameters={"defaultModelsExpandDepth": -1},
 )
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
+
+
+def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    """429 응답도 다른 에러와 같은 {detail} 스키마로 통일한다(프론트가 에러를 한 형태로 파싱하도록).
+
+    slowapi 기본 핸들러는 {"error": ...} 를 주는데, 이 모듈의 다른 모든 에러(401/404/409/400)는
+    {"detail": ...} 라 클라이언트가 두 형태를 모두 다뤄야 했다.
+    """
+    resp = JSONResponse(
+        status_code=429,
+        content={"detail": f"요청이 너무 잦습니다. 잠시 후 다시 시도해주세요. ({exc.detail})"},
+    )
+    try:  # 기본 핸들러처럼 Retry-After 등 속도제한 헤더를 실어 준다
+        resp = request.app.state.limiter._inject_headers(resp, request.state.view_rate_limit)
+    except Exception:
+        pass
+    return resp
+
+
+app.add_exception_handler(RateLimitExceeded, _rate_limit_handler)  # type: ignore[arg-type]
+
+# CORS — 프론트가 React 등 브라우저 SPA로 바뀔 때를 대비한 사전 설정.
+#   Streamlit(서버 대 서버 호출)에는 필요 없지만, 미리 열어둬도 무방하다.
+#   와일드카드("*") + allow_credentials 조합은 브라우저가 막으므로 출처를 명시한다(config.CORS_ORIGINS).
+#   allow_headers="*" 로 X-Admin-Password·X-Access-Code 같은 커스텀 헤더의 프리플라이트를 허용한다.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=config.CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["X-Total-Count"],  # React가 페이지네이션 총 개수를 응답 헤더로 읽을 수 있게
+)
+
+
+@app.get("/health", summary="헬스체크(생존 확인)")
+def health():
+    """백엔드가 살아있는지 확인하는 용도. 프론트·프록시·모니터가 부담 없이 부를 수 있게
+    인증·속도 제한을 두지 않는다(프로세스 liveness 체크 — DB 등 의존성 검사는 하지 않는다).
+    """
+    return {"status": "ok"}
 
 
 @app.get("/options", response_model=OptionsOut, summary="선택지 목록 조회")
@@ -258,6 +308,27 @@ def get_options():
         summary_length=config.SUMMARY_LENGTH,
         language=config.LANGUAGE,
     )
+
+
+class SubscriberStatsOut(BaseModel):
+    """응답: 관리자 대시보드용 구독자 통계(백엔드가 집계 — 프론트가 다시 구현하지 않도록)."""
+    total_subscribers: int
+    confirmed_count: int
+    most_common_frequency: str
+    most_common_language: str
+
+
+@app.get("/subscribers/stats", response_model=SubscriberStatsOut, summary="구독자 통계 조회(관리자 전용)")
+@limiter.limit("60/minute")
+def subscriber_stats(request: Request, password: str | None = Security(_admin_password_header)):
+    """전체 구독자 통계(총원·확인 완료·최다 주기·최다 언어)를 백엔드가 집계해 반환한다(관리자 전용).
+
+    프론트가 목록을 받아 직접 세지 않아도 되게 백엔드가 계산한다 — React 등 다른 프론트가
+    붙어도 같은 집계를 다시 구현할 필요가 없다.
+    (이 경로는 /subscribers/{email} 보다 먼저 선언돼야 'stats' 가 이메일로 잡히지 않는다.)
+    """
+    require_admin(password)
+    return SubscriberStatsOut(**db.subscriber_stats())
 
 
 @app.post("/subscribers", response_model=SubscriberOut, status_code=201, summary="구독 추가(신규 구독)")
@@ -312,15 +383,26 @@ def confirm_subscription(token: str = Form(...)):
 
 @app.get("/subscribers", response_model=list[SubscriberOut], summary="전체 구독자 조회(관리자)")
 @limiter.limit("30/minute")
-def list_subscribers(request: Request, admin_password: str | None = Security(_admin_password_header)):
+def list_subscribers(
+    request: Request,
+    response: Response,
+    admin_password: str | None = Security(_admin_password_header),
+    limit: int | None = Query(None, ge=1, le=1000, description="한 번에 가져올 최대 개수(미지정 시 전체)"),
+    offset: int = Query(0, ge=0, description="앞에서 건너뛸 개수(페이지네이션)"),
+):
     """전체 구독자 목록. 관리자 전용 — X-Admin-Password 헤더 인증 필요(401 시 거부).
 
     인증 검사를 dependencies= 가 아니라 본문에서 하는 이유는 다른 관리자/본인 엔드포인트와
     같다 — @limiter.limit 이 요청을 먼저 집계한 뒤 인증이 돌아야 실패 요청도 속도 제한에
     걸려 관리자 비밀번호 무차별 대입(성공 시 전체 구독자 PII 유출)을 막을 수 있다.
+
+    페이지네이션: limit/offset 은 선택이며 미지정 시 전체를 반환한다(기존 동작 유지).
+    전체 개수는 응답 헤더 X-Total-Count 로 함께 준다(React 가 페이지 수 계산에 쓸 수 있게).
     """
     require_admin(admin_password)
-    return [_out(s) for s in subscriptions.load_subscriptions()]
+    response.headers["X-Total-Count"] = str(db.count_subscribers())
+    subs = subscriptions.load_subscriptions_page(limit if limit is not None else -1, offset)
+    return [_out(s) for s in subs]
 
 
 @app.post("/subscribers/{email}/access-code", status_code=202, summary="본인 확인 코드 발송")
@@ -335,8 +417,15 @@ def request_access_code(request: Request, email: str, background_tasks: Backgrou
     """
     email = subscriptions.normalize_email(email)
     if subscriptions.get_subscription(email) is not None:
-        code = db.generate_access_code(email)
-        background_tasks.add_task(_send_access_code_email, email, code)
+        # DB 오류가 나도 항상 동일한 202를 반환해 이메일 존재 여부가 응답으로 새지 않게 한다(열거 방지).
+        # code 가 None(예: 경합으로 방금 삭제됨)이면 발송 태스크를 걸지 않는다.
+        try:
+            code = db.generate_access_code(email)
+        except Exception as exc:
+            print(f"[인증 코드 발급 실패] {exc}")
+            code = None
+        if code:
+            background_tasks.add_task(_send_access_code_email, email, code)
     return {"detail": "등록된 이메일이면 인증 코드를 보냈습니다."}
 
 
@@ -367,19 +456,61 @@ def update_subscriber(
     request: Request,
     email: str,
     payload: SubscriberUpdate,
+    background_tasks: BackgroundTasks,
     admin_password: str | None = Security(_admin_password_header),
     access_code: str | None = Security(_access_code_header),
 ):
-    """구독자 정보를 수정한다. 없으면 404, 값이 잘못되면 400."""
+    """구독자 정보를 수정한다. 없으면 404, 값이 잘못되면 400.
+
+    payload.email 이 현재 이메일과 다르면 '이메일 변경'으로 처리한다: 새 주소로 (미확인)
+    재가입 + 확인 메일 발송 + 기존 주소 삭제(POST 신규가입과 같은 규칙 — 소유권이 바뀌므로
+    새 주소는 다시 확인이 필요하다). 예전엔 프론트가 'POST 재가입 + DELETE 삭제'로 우회했는데,
+    이 흐름을 백엔드가 담당해 어떤 프론트가 붙어도 같은 로직을 다시 구현하지 않게 한다.
+    """
     _check_admin_or_owner(email, admin_password, access_code)
     email = subscriptions.normalize_email(email)
-    if subscriptions.get_subscription(email) is None:
+    existing = subscriptions.get_subscription(email)
+    if existing is None:
         raise HTTPException(status_code=404, detail=f"구독자를 찾을 수 없습니다: {email}")
+
+    new_email = subscriptions.normalize_email(payload.email) if payload.email else email
+    if new_email != email:
+        # 이메일 변경 — 새 주소 재가입(미확인) + 확인 메일 + 기존 주소 삭제.
+        #   인증은 현재(old) 이메일 기준으로 이미 통과했고, 새 주소 가입은 POST 처럼 공개 동작이라
+        #   권한 관점에서도 일관된다. 이미 '확인된' 새 주소가 있으면 신규가입과 동일하게 409.
+        target = subscriptions.get_subscription(new_email)
+        if target is not None and target.confirmed:
+            raise HTTPException(status_code=409, detail=f"이미 구독 중인 이메일입니다: {new_email}")
+        try:
+            new_sub = subscriptions.save_subscription(_record(payload, new_email))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        # 기존 주소 삭제. 삭제(다른 트랜잭션)가 실패하면 방금 만든 새 주소를 되돌려(보상) 한 사용자가
+        # 두 구독으로 갈라지는 최악을 막는다. (단일 트랜잭션 rename 이 아니라 완전한 원자성은 아니지만,
+        # DELETE 를 try 밖에 두어 orphan 을 남기던 이전 버전보다 안전하다.)
+        try:
+            subscriptions.delete_subscription(email)
+        except Exception as exc:
+            try:
+                subscriptions.delete_subscription(new_email)  # 보상: 새로 만든 것 롤백
+            except Exception:
+                pass
+            raise HTTPException(status_code=500, detail="이메일 변경 중 오류가 발생했습니다. 다시 시도해주세요.")
+        if not new_sub.confirmed:
+            # 확인 메일은 기존 주소 삭제가 성공한 뒤에만 보낸다(롤백될 주소로 메일 보내지 않도록).
+            background_tasks.add_task(_send_confirmation_email, new_sub.email)
+        return _out(new_sub)  # 새 주소는 미확인(confirmed=False)으로 시작
+
+    # 이메일 그대로 — 제자리 수정(전체 교체).
     try:
         sub = subscriptions.save_subscription(_record(payload, email))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    return _out(sub)
+    out = _out(sub)
+    # PUT 은 이메일 확인 상태를 바꾸지 않는다 — save_subscription 이 돌려준 기본 False 가 아니라
+    # 실제 저장돼 있는 confirmed 를 응답에 담아, 확인된 사용자가 미확인으로 잘못 보이지 않게 한다.
+    out.confirmed = existing.confirmed
+    return out
 
 
 @app.delete(

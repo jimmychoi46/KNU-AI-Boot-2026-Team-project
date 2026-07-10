@@ -251,8 +251,12 @@ def _qa_agent(draft_json, original_links, language, sentence_range):
     )
     result_text = response.choices[0].message.content
     parsed = json.loads(result_text)
-
-    return parsed.get("issues", draft_json.get("issues", [])), parsed.get("qa_report", [])
+    # LLM 이 response_format 을 무시하고 비-object(JSON 배열 등)를 주면 .get 가 AttributeError 를
+    # 던져 상위의 좁은 except(OpenAIError/JSONDecodeError/TypeError)를 그대로 빠져나간다 — 형태를 방어한다.
+    if not isinstance(parsed, dict):
+        parsed = {}
+    fallback = draft_json if isinstance(draft_json, dict) else {}
+    return parsed.get("issues", fallback.get("issues", [])), parsed.get("qa_report", [])
 
 
 # ----------------------------------------------------

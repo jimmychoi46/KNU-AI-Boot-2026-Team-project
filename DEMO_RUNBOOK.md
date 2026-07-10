@@ -24,7 +24,7 @@
 
 > 한 번만 하면 됩니다. 이미 돌려본 적 있으면 건너뛰어도 됩니다.
 
-**(1) 파이썬 패키지 설치** — 두 폴더 각각:
+**(1) 파이썬 패키지 설치** — 두 폴더 각각: (단, 이건 병합 전 기준. 병합 이후라면 하나의 디렉터리에 통합하면서 requirements도 통합 예정)
 ```
 cd team_project
 pip install -r requirements.txt
@@ -202,25 +202,6 @@ python demo_helper.py list
 
 ---
 
-### 시연 8. ⭐ 차별점 — 같은 기사는 두 번 보내지 않는다 (재발송 방지)
-
-**보여주는 기능**: 시간 없는 직장인을 위해 *매일 새 것만* 보낸다 — 어제 받은 기사는 오늘 메일에서 빠지고, 새 기사가 하나도 없으면 그날은 아예 안 보낸다.
-
-1. 터미널③:
-   ```
-   python demo_helper.py norepeat-demo minjun@demo.com --open
-   ```
-2. 같은 구독자에게 3일 연속 발송을 재현하며, 1일차·2일차 메일 HTML 2개가 브라우저로 열립니다(안 열리면 `demo_output/norepeat_day1.html`·`norepeat_day2.html` 더블클릭).
-3. **성공 화면**:
-   - **1일차** 메일: 뉴스 **3건** 모두 포함.
-   - **2일차** 메일: 어제 3건 + 오늘 새 1건인데 → **새 기사 1건만** (어제 본 3건은 빠짐).
-   - **3일차**: 새 기사 없음 → 터미널에 `발송 안 함(스킵)`.
-4. 두 HTML을 나란히 두면 "어제 3건 → 오늘 새 1건만"이 한눈에 보입니다.
-
-  ![1일차: 뉴스 3건](docs/demo_screenshots/verify_norepeat_day1.png)
-  ![2일차: 어제 본 건 빠지고 새 기사만](docs/demo_screenshots/verify_norepeat_day2.png)
-
----
 
 ## 마무리
 

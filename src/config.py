@@ -20,12 +20,34 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 
 # 2-3. 셀프서비스(본인 조회/수정/구독취소) 전 본인 확인 코드의 유효 시간(분).
-ACCESS_CODE_TTL_MINUTES = int(os.getenv("ACCESS_CODE_TTL_MINUTES", "15"))
+#      정수가 아닌 값이 들어와도 import 단계에서 전체 기동이 막히지 않게 방어적으로 파싱한다.
+def _int_env(name, default):
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        print(f"[설정 경고] {name}='{raw}' 는 정수가 아니라 기본값 {default}을 사용합니다")
+        return default
+
+
+ACCESS_CODE_TTL_MINUTES = _int_env("ACCESS_CODE_TTL_MINUTES", 15)
 
 # 2-4. report.py 가 뉴스레터 메일 하단(구독취소/발송 설정)에 넣을 프론트엔드(Streamlit) 주소.
 FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "http://localhost:8501")
 
-# 2-5. report.py 가 메일 상단/하단에 넣는 뉴스레터 표시 이름.
+# 2-5. CORS 허용 출처 — 프론트가 React 등 브라우저 SPA로 바뀌면 브라우저가 교차 출처 요청을 막으므로
+#      백엔드가 허용 출처를 열어줘야 한다. 지금 프론트(Streamlit)는 서버 대 서버 호출이라 실제로는
+#      필요 없지만, 나중을 대비해 미리 켜 둔다. .env의 CORS_ORIGINS(콤마 구분)로 조정하고, 기본값은
+#      로컬 React 개발 서버(CRA 3000 / Vite 5173)다.
+CORS_ORIGINS = [
+    o.strip()
+    for o in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:5173").split(",")
+    if o.strip()
+]
+
+# 2-6. report.py 가 메일 상단/하단에 넣는 뉴스레터 표시 이름.
 NEWSLETTER_NAME = "트렌드 뉴스레터"
 
 
@@ -111,5 +133,12 @@ TREND_TOP_N = 5
 # 8. 재발송 방지 — 구독자별로 이미 받은 기사(링크)를 기록해 다음 발송에서 뺀다.
 #    보존 기간은 가장 긴 발송 간격(매주=7일)보다 길어야 지난주에 보낸 기사가 이번 주에 다시 안 나간다.
 SENT_ARTICLE_RETENTION_HOURS = 24 * 8
+# 근접 중복(같은 안건) 방지 — 링크가 달라도 제목+요약이 거의 같은 기사(전재·경미한 수정)를
+#   같은 것으로 보고 다음 발송에서 뺀다. 기사 SimHash(문자 3-gram, 64비트)의 Hamming 거리가
+#   이 값 이하면 근접 중복. 보정 관측: 전재/경미수정본은 0~11, '같은 사건이라도 독립적으로 쓴
+#   기사'·다른 사건은 26 이상으로 뚜렷이 갈린다(문자 3-gram이라 실제 텍스트 재사용이 없으면
+#   거의 랜덤 거리). 그 사이(12)를 임계값으로 둬서 전재본은 잡되 독립 기사 오합병(진짜 새 뉴스
+#   누락)은 피한다. 음수로 두면 근접 중복을 끄고 완전 일치(URL)만 본다.
+NEAR_DUP_HAMMING_MAX = 12
 # 트렌드 첨부 요일은 상수로 두지 않고 subscriptions.is_weekly_anchor 가 각 구독자의
 # FREQUENCY_WEEKDAYS 에서 '이번 주 첫 발송 요일'을 직접 도출한다(발송 요일 규칙과 자동 일치).

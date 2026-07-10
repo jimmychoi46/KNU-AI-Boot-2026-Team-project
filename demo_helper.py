@@ -1,4 +1,4 @@
-"""시연 보조 CLI — 발표자가 DB/curl 을 직접 안 만지고 데모를 돌리도록 돕는다.
+"""시연 보조 CLI - 발표자가 DB/curl 을 직접 안 만지고 데모를 돌리도록 돕는다.
 
 Windows 콘솔(cp949)에서도 안 깨지게, 출력은 한글 + ASCII 기호([OK]/[X]/->)만 쓴다.
 
@@ -233,9 +233,9 @@ def cmd_pipeline_demo(args):
 
 
 def cmd_norepeat_demo(args):
-    """재발송 방지 시연 — 같은 구독자에게 이틀 발송해 '둘째 날엔 새 기사만' 나가는 걸 두 HTML로 대조.
+    """재발송 방지 시연 - 같은 구독자에게 이틀 발송해 '둘째 날엔 새 기사만' 나가는 걸 두 HTML로 대조.
 
-    실 DB/메일 안 건드리고 임시 DB에서 실제 발송 경로(_drop_seen_articles→render)를 그대로 돌린다.
+    실 DB/메일 안 건드리고 임시 DB에서 실제 발송 경로(_drop_seen_articles->render)를 그대로 돌린다.
     """
     import tempfile
     from datetime import datetime
@@ -287,7 +287,7 @@ def cmd_norepeat_demo(args):
                 f.write(daily[0])
             return p
 
-        tue = KST.localize(datetime(2026, 7, 7, 8, 0))   # 화요일(비앵커 — 주간 트렌드 안 섞임)
+        tue = KST.localize(datetime(2026, 7, 7, 8, 0))   # 화요일(비앵커 - 주간 트렌드 안 섞임)
         wed = KST.localize(datetime(2026, 7, 8, 8, 0))
         thu = KST.localize(datetime(2026, 7, 9, 8, 0))
         _p("[재발송 방지 시연] 같은 구독자에게 3일 연속 발송을 재현합니다(임시 DB, 실메일 아님).")
@@ -309,7 +309,7 @@ def cmd_norepeat_demo(args):
         except OSError:
             pass
     _p("")
-    _p("[OK] 1일차·2일차 HTML 을 나란히 열어 보여주세요 — 1일차는 뉴스 3건, 2일차는 '새 기사'만 1건입니다.")
+    _p("[OK] 1일차·2일차 HTML 을 나란히 열어 보여주세요 - 1일차는 뉴스 3건, 2일차는 '새 기사'만 1건입니다.")
     if "--open" in args:
         for p in saved_paths:
             try:

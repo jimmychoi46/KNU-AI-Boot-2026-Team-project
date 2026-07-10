@@ -122,9 +122,11 @@ def within_recency(item, now, hours):
         return False # published_at 컬럼 미존재 시 수집 제외
     try:
         published = datetime.fromisoformat(iso)
-    except ValueError:
-        return False # 날짜를 알 수 없을 경우 수집 제외
-    return published >= now - timedelta(hours=hours) 
+        return published >= now - timedelta(hours=hours)
+    except (ValueError, TypeError):
+        # ValueError: 날짜 파싱 실패. TypeError: tz-naive published 를 tz-aware now 와 비교(offset 불일치).
+        # 한 건의 비교 실패가 수집 사이클 전체를 죽이지 않도록 그 항목만 제외한다.
+        return False
 
 
 def dedupe(items):

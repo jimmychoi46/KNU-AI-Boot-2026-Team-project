@@ -1,3 +1,4 @@
+import hashlib
 import hmac
 import json
 import os
@@ -34,6 +35,7 @@ CREATE TABLE IF NOT EXISTS articles (
     description  TEXT,
     published_at TEXT,                 -- ISO 8601 (수집 단계에서 날짜 불명 기사는 이미 걸러짐)
     collected_at TEXT    NOT NULL,     -- ISO 8601
+    simhash      TEXT,                 -- 제목+요약 SimHash(16진수) - 근접 중복(같은 안건) 판정용
     UNIQUE(keyword, link)
 );
 
@@ -74,6 +76,7 @@ CREATE TABLE IF NOT EXISTS sent_articles (
     email   TEXT    NOT NULL,          -- 수신자
     link    TEXT    NOT NULL,          -- 정규화된 기사 링크(재발송 방지 키)
     sent_at TEXT    NOT NULL,          -- ISO 8601 — 보존 기간 정리용
+    simhash TEXT,                      -- 발송한 기사의 SimHash - 다음 발송의 근접 중복 판정용
     PRIMARY KEY(email, link)
 );
 
@@ -83,6 +86,9 @@ CREATE TABLE IF NOT EXISTS sent_articles (
 _INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_articles_keyword ON articles(keyword);
 CREATE INDEX IF NOT EXISTS idx_articles_published_at ON articles(published_at);
+-- 근접 중복 판정이 link 로 SimHash 를 조회한다(WHERE link IN (...)). keyword 선두 복합 인덱스로는
+-- link 단독 필터를 못 받으므로 발송/기록마다 풀스캔이 되는 걸 막는 전용 인덱스.
+CREATE INDEX IF NOT EXISTS idx_articles_link ON articles(link);
 CREATE INDEX IF NOT EXISTS idx_digests_lookup ON digests(keyword, summary_length, language, created_at);
 CREATE INDEX IF NOT EXISTS idx_subscribers_confirm_token ON subscribers(confirm_token);
 -- digests 이력을 8일 보존하면서 커지므로: 트렌드 집계 JOIN(digest_topics→digest_issues→digests)의
@@ -130,6 +136,12 @@ _COLUMN_MIGRATIONS = {
     "digests": {
         "latest_article_at": "TEXT",  # 스냅샷이 담은 기사 중 가장 최근 발행일(발송 포함 기간 판정용)
     },
+    "articles": {
+        "simhash": "TEXT",  # 제목+요약 SimHash - 근접 중복(같은 안건) 판정용
+    },
+    "sent_articles": {
+        "simhash": "TEXT",  # 발송한 기사의 SimHash - 다음 발송의 근접 중복 판정용
+    },
 }
 
 
@@ -138,7 +150,14 @@ def _ensure_columns(conn, table, columns):
     existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     for name, ddl in columns.items():
         if name not in existing:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+            except sqlite3.OperationalError as exc:
+                # 스케줄러+API 가 새 DB 에 동시에 기동하면 두 프로세스가 같은 컬럼을 각각 ALTER 하다
+                # 두 번째가 'duplicate column name' 을 만난다 — 이미 추가됐다는 뜻이라 무시한다.
+                # 그 외 OperationalError(락 등)는 그대로 전파해 진짜 문제를 숨기지 않는다.
+                if "duplicate column name" not in str(exc).lower():
+                    raise
 
 
 def _normalize_email_casing(conn):
@@ -309,6 +328,67 @@ def count_subscribers(path=None):
         return 0
 
 
+def subscriber_stats(path=None):
+    """관리자 대시보드용 통계를 SQL 집계로 계산해 dict 로 반환(전체 행을 파이썬으로 로드하지 않는다).
+
+    반환: {total_subscribers, confirmed_count, most_common_frequency, most_common_language}.
+    테이블이 없거나 비어 있으면 0/'없음' 을 준다.
+    """
+    def _top(conn, column):  # column 은 고정 리터럴(frequency/language)이라 주입 위험 없음
+        row = conn.execute(
+            f"SELECT {column} FROM subscribers "
+            f"WHERE {column} IS NOT NULL AND {column} != '' "
+            f"GROUP BY {column} ORDER BY COUNT(*) DESC, {column} LIMIT 1"
+        ).fetchone()
+        return row[0] if row else "없음"
+    try:
+        with closing(_connect(path)) as conn:
+            total, confirmed = conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(confirmed), 0) FROM subscribers"
+            ).fetchone()
+            freq = _top(conn, "frequency")
+            lang = _top(conn, "language")
+    except sqlite3.OperationalError as exc:
+        print(f"[DB 경고] subscriber_stats 실패({exc}) - 0/'없음'으로 처리됩니다")
+        return {"total_subscribers": 0, "confirmed_count": 0,
+                "most_common_frequency": "없음", "most_common_language": "없음"}
+    return {
+        "total_subscribers": total,
+        "confirmed_count": confirmed,
+        "most_common_frequency": freq,
+        "most_common_language": lang,
+    }
+
+
+def fetch_subscribers_page(limit=-1, offset=0, path=None):
+    """구독자 한 페이지를 행(dict) 리스트로 반환(SQL LIMIT/OFFSET). limit=-1 이면 전체.
+
+    fetch_all_subscribers 와 같은 정렬(email)·행 형태(keywords 리스트 복원)이되, 전체를
+    메모리로 올린 뒤 자르지 않고 DB 에서 필요한 페이지만 가져온다.
+    """
+    try:
+        with closing(_connect(path)) as conn:
+            rows = conn.execute(
+                """SELECT email, name, keywords, send_hour, send_minute,
+                          frequency, summary_length, language, confirmed
+                   FROM subscribers ORDER BY email LIMIT ? OFFSET ?""",
+                (limit, offset),
+            ).fetchall()
+    except sqlite3.OperationalError as exc:
+        print(f"[DB 경고] fetch_subscribers_page 실패({exc}) - 이번 호출은 빈 목록으로 처리됩니다")
+        return []
+    result = []
+    for row in rows:
+        record = dict(row)
+        try:
+            record["keywords"] = json.loads(record["keywords"]) if record["keywords"] else []
+        except (json.JSONDecodeError, TypeError):
+            record["keywords"] = []
+        record["confirmed"] = bool(record["confirmed"])
+        result.append(record)
+    return result
+
+
 def fetch_confirm_token(email, path=None):
     """이메일의 현재 확인 토큰을 반환. 이미 확인됐거나(토큰 폐기됨) 없는 이메일이면 None.
     """
@@ -461,6 +541,40 @@ def _normalize_link(link):
     return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, urlencode(query), ""))
 
 
+_SIMHASH_BITS = 64
+
+
+def _simhash(text):
+    """제목+요약 텍스트의 문자 3-gram SimHash(64비트, 16진수 문자열). 근접 중복(같은 안건) 탐지용.
+
+    결정론적 해시(blake2b)라 실행/프로세스마다 값이 같다 - DB 에 저장해두고 다음 발송과 비교한다.
+    문자 3-gram 이라 한국어 형태소 분석 없이도 '거의 같은 글'이 작은 Hamming 거리를 갖는다.
+    텍스트가 3글자 미만이면 None(판정 제외).
+    """
+    text = " ".join((text or "").split()).lower()
+    if len(text) < 3:
+        return None
+    weights = {}
+    for i in range(len(text) - 2):
+        gram = text[i:i + 3]
+        weights[gram] = weights.get(gram, 0) + 1
+    vector = [0] * _SIMHASH_BITS
+    for gram, weight in weights.items():
+        h = int.from_bytes(hashlib.blake2b(gram.encode("utf-8"), digest_size=8).digest(), "big")
+        for bit in range(_SIMHASH_BITS):
+            vector[bit] += weight if (h >> bit) & 1 else -weight
+    fingerprint = 0
+    for bit in range(_SIMHASH_BITS):
+        if vector[bit] > 0:
+            fingerprint |= 1 << bit
+    return f"{fingerprint:016x}"
+
+
+def _hamming_hex(a, b):
+    """두 16진수 SimHash 문자열의 Hamming 거리(서로 다른 비트 수)."""
+    return bin(int(a, 16) ^ int(b, 16)).count("1")
+
+
 def fetch_seen_links(email, links, path=None):
     """email 이 이미 받은(발송 내역에 있는) 링크만 골라 반환.
 
@@ -492,16 +606,84 @@ def fetch_seen_links(email, links, path=None):
     return seen
 
 
+def fetch_seen_or_similar(email, links, path=None):
+    """email 이 이미 받은 링크 + 근접 중복(같은 안건) 기사를 '이미 본 것'으로 골라 반환.
+
+    두 층을 합친다:
+      1) 완전 일치 - 정규화 링크가 발송 내역에 있음(fetch_seen_links, 기존 재발송 방지).
+      2) 근접 중복 - 그 링크 기사의 SimHash 가 이 사람이 이미 받은 기사 SimHash 와
+         Hamming <= NEAR_DUP_HAMMING_MAX. 링크가 달라도 제목+요약이 거의 같은 전재/경미
+         수정 기사를 같은 안건으로 본다. 임계값을 작게 둬 서로 다른 안건 오합병(진짜 뉴스
+         누락)을 피한다.
+    반환: 입력 links(원본) 중 빼야 할 링크 set. 근접 중복 조회가 실패하면(락 등) 완전 일치분만
+    돌려줘 발송을 막지 않는다. config.NEAR_DUP_HAMMING_MAX 가 음수면 근접 중복은 끈다.
+    """
+    seen = fetch_seen_links(email, links, path)
+    if config.NEAR_DUP_HAMMING_MAX < 0:
+        return seen
+    remaining = [link for link in links if link and link not in seen]
+    if not remaining:
+        return seen
+    try:
+        with closing(_connect(path)) as conn:
+            sent = [
+                r["simhash"] for r in conn.execute(
+                    "SELECT DISTINCT simhash FROM sent_articles WHERE email = ? AND simhash IS NOT NULL",
+                    (email,),
+                ).fetchall()
+            ]
+            if not sent:
+                return seen
+            candidates = {}
+            for i in range(0, len(remaining), 400):
+                chunk = remaining[i:i + 400]
+                placeholders = ",".join("?" * len(chunk))
+                for row in conn.execute(
+                    f"SELECT link, simhash FROM articles WHERE simhash IS NOT NULL AND link IN ({placeholders})",
+                    chunk,
+                ).fetchall():
+                    candidates.setdefault(row["link"], row["simhash"])
+    except sqlite3.OperationalError as exc:
+        print(f"[근접 중복 조회 경고] {email}: {exc} - 이번엔 근접 중복 판정을 건너뜁니다")
+        return seen
+    limit = config.NEAR_DUP_HAMMING_MAX
+    sent_ints = [int(s, 16) for s in sent]  # 후보마다 재파싱하지 않도록 한 번만 정수화
+    for link, fingerprint in candidates.items():
+        fp_int = int(fingerprint, 16)
+        if any(bin(fp_int ^ s).count("1") <= limit for s in sent_ints):
+            seen.add(link)
+    return seen
+
+
 def record_sent_articles(email, links, now=None, path=None):
-    """email 에게 방금 발송한 기사 링크들을 발송 내역에 기록(정규화 후, 이미 있으면 무시)."""
+    """email 에게 방금 발송한 기사 링크를 발송 내역에 기록(정규화 후, 이미 있으면 무시).
+
+    각 링크의 기사 SimHash 도 함께 저장한다 - 다음 발송에서 링크가 다른 근접 중복(같은 안건)을
+    걸러내는 데 쓴다. 기사가 이미 정리됐으면 SimHash 는 NULL(그 링크는 완전 일치로만 걸림).
+    """
     ts = _now(now).isoformat()
-    norms = {_normalize_link(link) for link in links if link and _normalize_link(link)}
-    if not norms:
+    norm_to_orig = {}
+    for link in links:
+        if not link:
+            continue
+        norm = _normalize_link(link)
+        if norm:
+            norm_to_orig.setdefault(norm, link)
+    if not norm_to_orig:
         return
     with closing(_connect(path)) as conn, conn:
+        originals = list(norm_to_orig.values())
+        simmap = {}
+        for i in range(0, len(originals), 400):
+            chunk = originals[i:i + 400]
+            placeholders = ",".join("?" * len(chunk))
+            for row in conn.execute(
+                f"SELECT link, simhash FROM articles WHERE link IN ({placeholders})", chunk
+            ).fetchall():
+                simmap[row["link"]] = row["simhash"]
         conn.executemany(
-            "INSERT OR IGNORE INTO sent_articles (email, link, sent_at) VALUES (?, ?, ?)",
-            [(email, link, ts) for link in norms],
+            "INSERT OR IGNORE INTO sent_articles (email, link, sent_at, simhash) VALUES (?, ?, ?, ?)",
+            [(email, norm, ts, simmap.get(orig)) for norm, orig in norm_to_orig.items()],
         )
 
 
@@ -534,12 +716,13 @@ def save_articles(articles_by_keyword, now=None, path=None):
                 title = item.get("title", "")
                 if not link or not title:
                     continue  # 링크/제목 없는 불완전 기사는 저장하지 않음
+                description = item.get("description", "")
                 cur = conn.execute(
                     """INSERT OR IGNORE INTO articles
-                       (keyword, title, link, description, published_at, collected_at)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
-                    (keyword, title, link, item.get("description", ""),
-                     item.get("published_at"), ts),
+                       (keyword, title, link, description, published_at, collected_at, simhash)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (keyword, title, link, description,
+                     item.get("published_at"), ts, _simhash(f"{title} {description}")),
                 )
                 inserted += cur.rowcount
     return inserted
