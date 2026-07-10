@@ -13,7 +13,7 @@ from src.subscriptions import due_subscribers, is_weekly_anchor, load_subscripti
 def _daily_subject(sub):
     """구독자의 실제 키워드로 일간 메일 제목을 만든다.
 
-    예전엔 dispatch_one 이 '금융'을 하드코딩하고 run_for_subscriber 는 키워드 리스트를 그대로 넣어
+    예전엔 dispatch_one 이 고정 분야명을 하드코딩하고 run_for_subscriber 는 키워드 리스트를 그대로 넣어
     (['주식'] 처럼) 파이썬 표기가 제목에 새어 나왔다 — 둘 다 구독 키워드를 반영하도록 통일한다.
     """
     if not sub.keywords:

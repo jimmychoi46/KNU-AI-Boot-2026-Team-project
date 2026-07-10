@@ -202,7 +202,7 @@ def _send_confirmation_email(email):
         "</body></html>"
     )
     try:
-        send_email.send_email(email, subject="[데일리 금융 뉴스] 구독 확인이 필요합니다", body_html=body_html)
+        send_email.send_email(email, subject="[트렌드 뉴스레터] 구독 확인이 필요합니다", body_html=body_html)
     except Exception as exc:  # SMTP 실패가 회원가입 자체를 막지 않도록 격리
         logger.warning("[확인 메일 발송 실패] %s: %s", _mask_email(email), exc)
 
@@ -217,7 +217,7 @@ def _send_access_code_email(email, code):
         "</body></html>"
     )
     try:
-        send_email.send_email(email, subject="[데일리 금융 뉴스] 본인 확인 코드", body_html=body_html)
+        send_email.send_email(email, subject="[트렌드 뉴스레터] 본인 확인 코드", body_html=body_html)
     except Exception as exc:  # SMTP 실패가 요청 자체를 막지 않도록 격리
         logger.warning("[본인 확인 코드 발송 실패] %s: %s", _mask_email(email), exc)
 
@@ -279,7 +279,7 @@ async def lifespan(app):
 app = FastAPI(
     title="구독자 관리 API",
     version="1.0.0",
-    description="데일리 금융 뉴스 브리핑 — 구독자 관리 API",
+    description="개인화 트렌드 뉴스레터 — 구독자 관리 API",
     lifespan=lifespan,
     # /docs 하단 'Schemas' 목록을 접는다(-1). 거기 모이는 FastAPI 자동 생성 스키마
     # (HTTPValidationError 등)를 숨겨 화면을 정리 — 각 엔드포인트 안의 요청/응답 예시는 그대로다.
