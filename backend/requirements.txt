@@ -1,0 +1,15 @@
+APScheduler==3.11.3
+python-dotenv==1.2.2
+pytz==2026.2
+requests==2.34.2
+
+# LLM/Agent (뉴스 요약·QA, OpenRouter 경유 GPT-4o 호출)
+openai==1.59.7
+
+# 구독자 REST API (Swagger 자동 생성: /docs)
+fastapi==0.139.0
+uvicorn==0.50.2
+python-multipart==0.0.32   # POST /confirm 이 Form(...) 으로 폼 바디 파싱 — 없으면 확인(더블 옵트인) 흐름이 500
+httpx==0.28.1          # 테스트(FastAPI TestClient)용
+slowapi==0.1.10        # 가입/인증코드/본인확인 엔드포인트 속도 제한(무차별 대입·메일 폭탄 방지)
+

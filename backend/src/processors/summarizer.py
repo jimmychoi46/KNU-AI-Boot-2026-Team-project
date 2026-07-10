@@ -1,0 +1,187 @@
+import json
+import logging
+import re
+
+import openai
+
+# LLM_fn.py에 이미 구현해 둔 요약 Agent / QA Agent / 길이 프리셋 / 안전 로그 포맷터를 그대로 재사용한다.
+from LLM_fn import _summarize_agent, _qa_agent, _safe_error_str, LENGTH_PRESETS
+
+logger = logging.getLogger(__name__)
+
+
+# ----------------------------------------------------
+# 백엔드가 넘겨준 '정제된 뉴스 아이템 리스트'를 LLM 프롬프트용 텍스트로 변환
+# (raw 네이버 API 응답이 아니라, 이미 태그/엔티티 제거·날짜 파싱까지 끝난 상태)
+# ----------------------------------------------------
+def _build_context(cleaned_items):
+    cleaned_text = ""
+    original_links = []
+
+    for idx, item in enumerate(cleaned_items, 1):
+        title = item.get("title", "")
+        description = item.get("description", "")
+        link = item.get("link", "")
+        published_at = item.get("published_at", "")
+
+        cleaned_text += (
+            f"[{idx}번 뉴스]\n제목: {title}\n내용: {description}\n"
+            f"발행일: {published_at}\n링크: {link}\n\n"
+        )
+        if link:
+            original_links.append(link)
+
+    return cleaned_text, original_links
+
+
+_NUM_RE = re.compile(r"\d[\d,.]*")
+
+
+def _ungrounded_numbers(text, src_digit_blob):
+    """text 의 숫자 토큰 중 원문 숫자열(src_digit_blob)에 없는 것 — 환각 수치 후보를 반환.
+
+    링크 무결성(_validate_links)이 '원문에 없는 링크'를 코드로 제거하듯, '원문에 없는 숫자'를
+    코드로 잡는 결정적 백스톱이다(프롬프트 규칙 5-1 과 이중 방어). 콤마는 무시하고(7,400==7400)
+    부분 문자열로 대조해, 원문에 명시된 수치는 통과시키고 지어낸 수치(예: 2.9%, 7400선)만 잡는다.
+    """
+    bad = []
+    for m in _NUM_RE.findall(text or ""):
+        norm = m.replace(",", "").strip(".")
+        if norm and norm not in src_digit_blob:
+            bad.append(m)
+    return bad
+
+
+def summarize(collected, summary_length, language):
+    """정제된 뉴스를 요약·편집한다.
+
+    [인터페이스 계약] — 구현 시 아래 입출력 형태를 지켜주세요.
+        args:
+            collected(dict): {query(str): [cleaned_item(dict), ...]}
+                cleaned_item: {"title", "link", "description", "published_at"}
+                (백엔드가 이미 태그·엔티티 제거, 날짜 파싱까지 마친 상태)
+            summary_length(str): config.SUMMARY_LENGTH 중 하나 ("짧게"/"중간"/"길게")
+                — 요약 문장 길이/분량을 이 값에 맞춰야 한다.
+            language(str): config.LANGUAGE 중 하나 ("한국어"/"영어")
+                — headline/summary 를 이 언어로 작성해야 한다.
+                (원문이 한국어 뉴스라도 language="영어" 면 영어로 번역·요약)
+        returns:
+            dict: 렌더러(기획/데이터)가 소비할 구조. 예)
+                {query(str): [{"headline": str, "topic": str, "topic_summary": str, "link": str}, ...]}
+
+    백엔드는 구독자마다 다른 summary_length/language 조합에 대해 이 함수를 별도로 호출하고,
+    결과를 그 조합 전용으로 저장한다(같은 기사도 조합마다 다른 요약이 남는다).
+
+    내부 동작: query별로 [요약 Agent] -> [편집/QA Agent] -> [링크 무결성 필터링]을 거쳐
+    이슈 단위 결과를 인터페이스가 요구하는 '행(row) 단위' 리스트로 펼쳐서 반환한다.
+    """
+    if summary_length not in LENGTH_PRESETS:
+        logger.warning(f"알 수 없는 summary_length '{summary_length}' → '중간'으로 대체합니다.")
+        summary_length = "중간"
+    sentence_range = LENGTH_PRESETS[summary_length]
+
+    result = {}
+
+    for query, items in collected.items():
+        news_context, original_links = _build_context(items)
+        # 숫자 환각 방지용 원문 숫자열(제목+내용, 콤마·공백 제거) — 아래 행 생성 시 근거 대조에 쓴다.
+        src_digit_blob = re.sub(r"[,\s]", "", " ".join(
+            (it.get("title", "") + " " + it.get("description", "")) for it in items))
+
+        if not news_context:
+            logger.warning(f"'{query}' 쿼리에 대해 처리할 뉴스가 없습니다.")
+            result[query] = []
+            continue
+
+        # ---------------- Agent 1: 요약 ----------------
+        # openai.OpenAIError/JSONDecodeError/TypeError(빈 응답)로 좁혀서, 이 코드 자체의
+        # 버그(NameError 등)까지 "API 실패"로 오인되어 조용히 삼켜지지 않도록 한다.
+        try:
+            draft_text = _summarize_agent(news_context, language, sentence_range)
+            draft_json = json.loads(draft_text)
+        except (openai.OpenAIError, json.JSONDecodeError, TypeError) as e:
+            logger.error(f"[요약 Agent] '{query}' 처리 실패: {_safe_error_str(e)}")
+            result[query] = []
+            continue
+
+        # ---------------- Agent 2: 편집/QA ----------------
+        # 요약 Agent 와 같은 실패 유형(빈 응답 → json.loads(None) 의 TypeError 포함)을 잡아,
+        # QA 실패는 이 쿼리만 초안으로 대체하고 다음 쿼리로 넘어가게 한다. TypeError 를 빼면
+        # 빈 응답 하나가 summarize() 밖으로 전파돼 그 호출의 나머지 쿼리·구독자 발송까지 막는다.
+        try:
+            final_issues, qa_report = _qa_agent(draft_json, original_links, language, sentence_range,
+                                                source_text=news_context)
+        except (openai.OpenAIError, json.JSONDecodeError, TypeError) as e:
+            logger.error(f"[QA Agent] '{query}' 실행 실패, 요약 Agent 초안으로 대체합니다: {_safe_error_str(e)}")
+            # draft_json 이 dict 가 아니면(모델이 JSON 배열 등을 반환) .get 이 AttributeError 를 던져
+            # 좁은 except 를 빠져나가 쿼리 격리가 깨진다 — dict 일 때만 issues 를 꺼낸다.
+            final_issues = draft_json.get("issues", []) if isinstance(draft_json, dict) else []
+            qa_report = []
+
+        if qa_report:
+            logger.info(f"[QA Agent] '{query}' 수정 내역: {qa_report}")
+
+        # LLM 이 유효 JSON 으로 issues 를 null/비리스트로 주는 경우(모델이 필드를 비우는 흔한 케이스)가 있다.
+        # 그대로 순회하면 아래 for 가 TypeError 를 던지는데, 이 for 는 쿼리 루프의 try 밖이라 예외가
+        # summarize() 전체를 죽여(격리 실패) 그 구독자의 다른 키워드/조합 발송까지 막는다. 리스트가
+        # 아니면 이 쿼리만 빈 결과로 처리한다.
+        if not isinstance(final_issues, list):
+            logger.warning(f"'{query}' - issues 가 리스트가 아니라 이 쿼리를 빈 결과로 처리합니다: {final_issues!r}")
+            final_issues = []
+
+        # ---------------- 행(row) 단위로 펼치기 + 링크 무결성 최종 필터링 ----------------
+        rows = []
+        for issue in final_issues:
+            if not isinstance(issue, dict):
+                logger.warning(f"'{query}' - 이슈가 예상된 dict 형태가 아니라 건너뜁니다: {issue!r}")
+                continue
+            # headline/topic/summary 가 JSON null 이면 None 이 흘러든다 — DB NOT NULL INSERT 실패(IntegrityError로
+            # 요약 배치 중단)와 렌더의 html.escape(None) 크래시를 막으려 빈 문자열로 정규화한다.
+            headline = issue.get("headline") or ""
+            topics = issue.get("topics", [])
+            articles = issue.get("articles", [])
+
+            # LLM 응답은 json_object 형식만 보장할 뿐 스키마는 보장하지 않는다 — topics가
+            # dict 리스트가 아니면(예: 문자열 리스트) 아래 topic.get(...)에서 AttributeError로
+            # 이슈 전체를 물귀신처럼 끌고 내려가지 않도록 여기서 걸러낸다.
+            if not isinstance(topics, list) or any(not isinstance(t, dict) for t in topics):
+                logger.warning(f"'{query}' - '{headline}' 이슈의 topics가 예상된 형태가 아니라 건너뜁니다: {topics!r}")
+                continue
+
+            if not isinstance(articles, list):
+                articles = []
+
+            # 원본에 실제로 존재하는 링크만 남기고, 지어낸/교차 매칭된 링크는 제거
+            valid_links = [link for link in articles if link in original_links]
+            if len(valid_links) < len(articles):
+                logger.warning(
+                    f"'{query}' - '{headline}' 이슈에서 원본에 없는 링크를 제거했습니다: "
+                    f"{[l for l in articles if l not in original_links]}"
+                )
+
+            if not topics:
+                continue
+
+            # articles 는 이슈 단위(최대 3개)로 온다. 대표 링크 1개만 남기면 나머지가
+            # 버려지므로, 이슈의 모든 주제(topic)마다 유효 링크 전체를 행으로 펼친다
+            # (db.group_digest_rows 가 같은 headline/topic 의 행들을 링크 리스트로 다시 묶는다).
+            for topic in topics:
+                topic_summary = topic.get("summary") or ""
+                # 숫자 근거 백스톱 — 요약/제목에 원문에 없는 수치가 있으면 그 topic 을 버린다.
+                # 잘못된 숫자를 보내느니 그 항목을 누락하는 편이 낫다(가독성 기준 ①정확성: 자동 발송 금지).
+                ungrounded = _ungrounded_numbers(topic_summary + " " + headline, src_digit_blob)
+                if ungrounded:
+                    logger.warning(
+                        f"'{query}' - '{headline}' 요약에 원문에 없는 수치 {ungrounded} 감지 → 이 topic 제외(환각 방지)")
+                    continue
+                for link in (valid_links or [""]):
+                    rows.append({
+                        "headline": headline,
+                        "topic": topic.get("subtitle") or "",
+                        "topic_summary": topic_summary,
+                        "link": link,
+                    })
+
+        result[query] = rows
+
+    return result
