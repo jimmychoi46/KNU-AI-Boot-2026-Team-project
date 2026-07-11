@@ -37,6 +37,19 @@ def _build_context(cleaned_items):
 _NUM_RE = re.compile(r"\d[\d,.]*")
 
 
+def _canon_num(m):
+    """숫자 토큰을 대조용으로 정규화한다: 콤마 제거(7,400==7400), 양끝 점 제거,
+    정수는 앞자리 0 제거('07'==7). 발행일이 ISO 라 '07' 로 들어와도 요약이 자연스러운
+    한국어로 '7월'처럼 앞자리 0 없이 인용하면 같은 값으로 대조돼 거짓 양성이 안 난다.
+    소수는 앞자리 0 을 건드리지 않는다('0.5' 유지)."""
+    n = m.replace(",", "").strip(".")
+    if not n:
+        return None
+    if "." in n:
+        return n
+    return n.lstrip("0") or "0"
+
+
 def _source_numbers(items):
     """원문(제목+내용+발행일)에 실제로 등장하는 숫자 토큰의 집합. 요약이 이 집합에 없는 수치를
     쓰면 환각으로 본다(콤마 무시: 7,400==7400).
@@ -55,9 +68,9 @@ def _source_numbers(items):
         pub_date = str(it.get("published_at", ""))[:10]
         blob = f"{it.get('title', '')} {it.get('description', '')} {pub_date}"
         for m in _NUM_RE.findall(blob):
-            norm = m.replace(",", "").strip(".")
-            if norm:
-                nums.add(norm)
+            c = _canon_num(m)
+            if c:
+                nums.add(c)
     return nums
 
 
@@ -65,8 +78,8 @@ def _ungrounded_numbers(text, src_numbers):
     """text 의 숫자 토큰 중 원문 숫자 집합(src_numbers)에 없는 것 — 환각 수치 후보를 반환."""
     bad = []
     for m in _NUM_RE.findall(text or ""):
-        norm = m.replace(",", "").strip(".")
-        if norm and norm not in src_numbers:
+        c = _canon_num(m)
+        if c and c not in src_numbers:
             bad.append(m)
     return bad
 
