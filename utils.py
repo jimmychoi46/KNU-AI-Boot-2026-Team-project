@@ -424,6 +424,15 @@ def _request(method, path, **kwargs):
     return requests.request(method, url, timeout=10, **kwargs)
 
 
+def _safe_json(resp):
+    """응답 본문(JSON)을 파싱하되, 비유효 JSON이면 None 을 돌려 호출부가 형식 오류로 처리하게 한다.
+    (성공(2xx) 경로도 본문이 비정상일 수 있어 방어한다 — 에러 경로만 방어하던 비대칭 제거.)"""
+    try:
+        return resp.json()
+    except ValueError:
+        return None
+
+
 def _auth_headers(admin_password=None, access_code=None):
     """관리자 비밀번호/본인 확인 코드 중 있는 것만 헤더로 실어 보낸다."""
     headers = {}
@@ -435,16 +444,22 @@ def _auth_headers(admin_password=None, access_code=None):
 
 
 def _subscriber_to_dict(sub):
-    """API 응답(SubscriberOut) -> 프론트에서 쓰기 편한 dict (send_time 문자열 포함)."""
+    """API 응답(SubscriberOut) -> 프론트에서 쓰기 편한 dict (send_time 문자열 포함).
+    필드가 누락·비정상이어도 크래시하지 않게 기본값으로 방어한다."""
+    try:
+        hour = int(sub.get("send_hour", 0))
+        minute = int(sub.get("send_minute", 0))
+    except (TypeError, ValueError):
+        hour, minute = 0, 0
     return {
-        "name": sub["name"],
-        "email": sub["email"],
-        "keywords": _join_keywords(sub["keywords"]),
-        "send_time": _format_send_time(sub["send_hour"], sub["send_minute"]),
-        "frequency": sub["frequency"],
-        "summary_length": sub["summary_length"],
-        "language": sub["language"],
-        "confirmed": sub["confirmed"],
+        "name": sub.get("name", ""),
+        "email": sub.get("email", ""),
+        "keywords": _join_keywords(sub.get("keywords") or []),
+        "send_time": _format_send_time(hour, minute),
+        "frequency": sub.get("frequency", ""),
+        "summary_length": sub.get("summary_length", ""),
+        "language": sub.get("language", ""),
+        "confirmed": bool(sub.get("confirmed", False)),
     }
 
 
@@ -463,7 +478,10 @@ def load_subscribers(admin_password):
     if resp.status_code != 200:
         return None, _api_error_message(resp)
 
-    rows = [_subscriber_to_dict(s) for s in resp.json()]
+    data = _safe_json(resp)
+    if not isinstance(data, list):
+        return None, "서버 응답 형식이 올바르지 않습니다."
+    rows = [_subscriber_to_dict(s) for s in data if isinstance(s, dict)]
     columns = ["name", "email", "keywords", "send_time", "frequency", "summary_length", "language", "confirmed"]
     return pd.DataFrame(rows, columns=columns), None
 
@@ -501,7 +519,10 @@ def load_statistics(admin_password):
         return None, f"서버에 연결할 수 없습니다: {exc}"
     if resp.status_code != 200:
         return None, _api_error_message(resp)
-    return resp.json(), None
+    data = _safe_json(resp)
+    if not isinstance(data, dict):
+        return None, "서버 응답 형식이 올바르지 않습니다."
+    return data, None
 
 
 def save_subscriber(name, email, keywords, send_time, frequency, summary_length, language):
@@ -564,7 +585,10 @@ def get_subscriber_by_email(email, access_code):
         return None, f"서버에 연결할 수 없습니다: {exc}"
 
     if resp.status_code == 200:
-        return _subscriber_to_dict(resp.json()), None
+        data = _safe_json(resp)
+        if not isinstance(data, dict):
+            return None, "서버 응답 형식이 올바르지 않습니다."
+        return _subscriber_to_dict(data), None
     if resp.status_code in (401, 403, 404):
         return None, None
     return None, _api_error_message(resp)
