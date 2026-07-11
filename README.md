@@ -45,7 +45,7 @@ team_project/
 |---|---|---|
 | LLM/Agent | 검색·요약·편집 멀티에이전트 | `processors/summarizer.py` → `LLM_fn.py`(요약/QA Agent 구현체) |
 | **백엔드** | **스크래퍼·스케줄러·이메일 발송 서버·구독자 API** | **`collectors/`, `notifiers/`, `subscriptions.py`, `main.py`, `pipeline.py`, `config.py`, `api.py`** |
-| 프론트 | 구독 신청 페이지·키워드/발송시간 대시보드 | REST API(`api.py`) 호출 (`newsletter_project/utils.py`) |
+| 프론트 | 구독 신청 페이지·키워드/발송시간 대시보드 | REST API(`api.py`) 호출 (`frontend/utils.py`) |
 | 기획/데이터 | 요약 가독성 검증·템플릿 디자인·프롬프트 인젝션 방어 | `renderers/report.py', `templates/` |
 
 **기술 스택**
