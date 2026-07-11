@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import unicodedata
 from dataclasses import dataclass, field
 
 from src import config, db
@@ -65,27 +66,21 @@ def _looks_like_email(email):
     return bool(_EMAIL_RE.match(email)) # 이메일 형식이 _EMAIL_RE에 정의된 형식인지 확인, 형식이 일치하면 True, 불일치 시 False
 
 
-# 제어문자(C0/C1·DEL)와 양방향/서식/제로폭 등 '보이지 않는' 유니코드 서식 문자를 제거한다.
-# 이름·키워드·이메일에 섞이면 로그(ANSI 시퀀스) 오염·표시 무결성 훼손·이메일 시각적
-# 스푸핑(RTL 오버라이드 U+202E)에 악용될 수 있어, 정규화·정리 단계에서 없앤다(정상 입력엔 영향 없음).
-# 범위를 코드포인트로 구성한다 — 소스에 보이지 않는 문자를 직접 박아 넣으면 편집·리뷰가 어렵기 때문.
-_CONTROL_RANGES = (
-    (0x00, 0x1F), (0x7F, 0x9F),           # C0 / DEL / C1
-    (0xAD, 0xAD),                         # SOFT HYPHEN
-    (0x61C, 0x61C),                       # ARABIC LETTER MARK (양방향)
-    (0x180E, 0x180E),                     # MONGOLIAN VOWEL SEPARATOR
-    (0x200B, 0x200F),                     # 제로폭 + LRM/RLM
-    (0x202A, 0x202E),                     # 양방향 임베딩/오버라이드(RLO 등)
-    (0x2060, 0x2064), (0x2066, 0x206F),   # WORD JOINER·불가시 연산자 + 양방향 격리
-    (0xFEFF, 0xFEFF),                     # BOM (제로폭 no-break space)
-)
-_CONTROL_RE = re.compile(
-    "[" + "".join(f"{chr(lo)}-{chr(hi)}" for lo, hi in _CONTROL_RANGES) + "]"
-)
+# 제어(Cc: C0/C1·DEL·개행 등)·서식(Cf: 양방향 RLO(U+202E)·제로폭·소프트하이픈·태그블록 등)·
+# 라인/문단 구분자(Zl/Zp)와 한글 필러 같은 '보이지 않는' 유니코드 문자를 제거한다. 이름·키워드·
+# 이메일에 섞이면 로그(ANSI/개행) 오염·표시 무결성 훼손·이메일 시각적 스푸핑(RTL 오버라이드)·
+# 불가시 문자 은닉에 악용될 수 있다. 범위 열거는 늘 빠지는 문자가 생겨, 유니코드 카테고리로
+# 잡는다(정상 글자·공백엔 영향 없음).
+_STRIP_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
+# 카테고리가 Lo(글자)라 위 집합엔 안 잡히지만 폭 0/불가시라 은닉에 쓰이는 한글 필러들.
+_EXTRA_STRIP = frozenset({chr(0x115F), chr(0x1160), chr(0x3164), chr(0xFFA0)})
 
 
 def _strip_controls(text):
-    return _CONTROL_RE.sub("", str(text))
+    return "".join(
+        ch for ch in str(text)
+        if unicodedata.category(ch) not in _STRIP_CATEGORIES and ch not in _EXTRA_STRIP
+    )
 
 
 def normalize_email(email):

@@ -187,7 +187,7 @@ def weekly_trend_articles_for(keywords, now, language=None, cache=None):
 
 def _drop_seen_articles(digests, email):
     """digests 에서 이 구독자가 이미 받은 기사를 뺀다(재발송 방지). '이미 받음'은 완전 일치 링크뿐
-    아니라 근접 중복(링크가 달라도 제목+요약이 거의 같은 같은 안건, db.fetch_seen_or_similar)까지 본다.
+    아니라 근접 중복(링크가 달라도 제목+본문 스니펫이 거의 같은 같은 안건, db.fetch_seen_or_similar)까지 본다.
 
     링크가 있던 topic 의 링크가 전부 이미 본 것이면 그 topic(=이미 읽은 뉴스)을 통째로 뺀다.
     topic 이 다 빠진 issue, issue 가 다 빠진 keyword 도 제거한다(링크 없는 요약 topic 은 유지).
