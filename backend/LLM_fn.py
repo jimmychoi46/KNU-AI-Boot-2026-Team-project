@@ -120,7 +120,12 @@ def _validate_links(issues, original_links):
     filtered_issues = []
 
     for issue in issues:
-        articles = issue.get("articles") or []   # JSON null 이면 [] (None 순회 TypeError 방지)
+        articles = issue.get("articles")
+        if not isinstance(articles, list):
+            # LLM 이 articles 를 null·문자열·숫자로 잘못 주면 [] 로 취급한다. 문자열이면
+            # 글자 단위로 순회해 링크를 다 버리고, 숫자·bool 이면 순회에서 TypeError 가 나
+            # analyze_news 의 '항상 {success:...} 반환' 계약이 깨진다.
+            articles = []
         valid = [link for link in articles if link in original_links]
         invalid_links.extend(link for link in articles if link not in original_links)
         filtered_issues.append({**issue, "articles": valid})
