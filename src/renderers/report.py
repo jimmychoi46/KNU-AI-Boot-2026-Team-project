@@ -27,6 +27,13 @@ def _escaped_href(url):
     return html.escape(_safe_href(url), quote=True)
 
 
+def _esc(value):
+    """None·숫자 등 문자열이 아닌 값이 와도 안전하게 문자열로 만들어 이스케이프한다.
+    LLM 이 내는 JSON 은 스키마(값 타입)를 보장하지 않아 제목·요약이 숫자로 올 수 있는데,
+    그대로 html.escape 에 넘기면 int.replace 가 없어 AttributeError 로 발송이 통째로 멈춘다."""
+    return html.escape("" if value is None else str(value))
+
+
 _PLACEHOLDER = re.compile(r"\{\{([^{}]+)\}\}")
 
 
@@ -62,7 +69,7 @@ def _trend_keyword_block(keyword, topics):
     rows = []
     for t in topics:
         links = t.get("links") or []
-        summary = html.escape(t.get("summary", "") or "")
+        summary = _esc(t.get("summary"))
         link_html = (
             f'<a class="link-gold" href="{_escaped_href(links[0])}" '
             f'style="color:#a6842f; font-size:13px; font-weight:700; text-decoration:none;">관련 기사 보기 &rsaquo;</a>'
@@ -71,14 +78,14 @@ def _trend_keyword_block(keyword, topics):
         rows.append(
             '<tr><td style="padding:10px 0; border-bottom:1px solid #eef1f5;">'
             f'<p class="text-title" style="margin:0 0 4px 0; color:#0a2540; font-size:15px; font-weight:700;">'
-            f'{html.escape(t.get("topic") or "")}</p>'
+            f'{_esc(t.get("topic"))}</p>'
             f'<p class="text-body" style="margin:0 0 6px 0; color:#4a5568; font-size:14px; line-height:1.6;">{summary}</p>'
             f'{link_html}</td></tr>'
         )
     return (
         '<tr><td style="padding:16px 32px;">'
         f'<p class="text-title" style="margin:0 0 6px 0; color:#0a2540; font-size:17px; font-weight:800;">'
-        f'#{html.escape(keyword)}</p>'
+        f'#{_esc(keyword)}</p>'
         f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{"".join(rows)}</table>'
         '</td></tr>'
     )
@@ -141,15 +148,15 @@ def render(digests, now=None):
     highlight = ""
     for query, issues in digests.items():
         for issue in issues:
-            # 값이 JSON null(None)로 들어와도 html.escape(None) 크래시가 안 나도록 최후 방어선에서 정규화.
-            headline = issue.get("headline") or ""
+            # 값이 JSON null(None)·숫자로 들어와도 html.escape 크래시가 안 나도록 최후 방어선에서 문자열화.
+            headline = str(issue.get("headline") or "")
             highlight = highlight or headline
             for topic in issue.get("topics") or []:  # 값이 JSON null(None)이어도 안전(기본값은 키 부재 때만 적용됨)
                 links = topic.get("links") or []
                 items_html.append(_fill(_ITEM_BLOCK, {
-                    "카테고리": html.escape(query or ""),
-                    "뉴스_제목": html.escape(topic.get("topic") or headline or ""),
-                    "요약_본문": html.escape(topic.get("topic_summary") or ""),
+                    "카테고리": _esc(query),
+                    "뉴스_제목": _esc(topic.get("topic") or headline),
+                    "요약_본문": _esc(topic.get("topic_summary")),
                     "원문_링크": _escaped_href(links[0] if links else ""),
                 }))
 
