@@ -143,7 +143,9 @@ if user_email:
 
                 # 이메일은 본인 확인 기준이므로 기본값으로 보여주되 수정 가능하게 둔다.
                 edit_email = st.text_input("이메일 수정", value=subscriber["email"], key="user_email_edit")
-                if edit_email != user_email:
+                # 백엔드는 이메일을 casefold 정규화해 저장/반환하므로(subscriber["email"]은 소문자),
+                # 사용자가 대문자로 로그인(user_email)해도 '변경'으로 오판하지 않도록 정규화해 비교한다.
+                if edit_email.strip().casefold() != user_email.strip().casefold():
                     st.caption(
                         "이메일을 바꾸면 새 이메일로 다시 가입 처리되어, 그 주소로 확인 메일이 "
                         "재발송되고 인증 코드도 새로 받아야 합니다."
@@ -228,7 +230,7 @@ if user_email:
                     if success:
                         # 캐시를 비워 다음 실행에서 갱신된 값을 다시 조회하게 한다.
                         st.session_state.pop("user_dashboard_fetch_key", None)
-                        if edit_email != user_email:
+                        if edit_email.strip().casefold() != user_email.strip().casefold():
                             st.session_state.user_dashboard_pending_email = edit_email
                         st.success("내 구독 정보가 수정되었습니다.")
                         st.rerun()

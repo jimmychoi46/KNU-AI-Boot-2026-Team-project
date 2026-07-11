@@ -168,7 +168,7 @@ def weekly_trend_articles_for(keywords, now, language=None, cache=None):
     cache(dict, optional): 같은 dispatch_job 실행 안에서 여러 구독자가 공유하는 (키워드,언어) 조합의
         집계 결과를 재사용해 동일 쿼리 반복을 막는다(없는 조합도 캐시에 저장). 언어가 달라도 안 섞이게
         캐시 키에 언어를 포함한다.
-    returns: {keyword: [{"topic", "days", "summary", "links"}, ...]} (트렌드 있는 키워드만).
+    returns: {keyword: [{"topic", "article_count", "summary", "links"}, ...]} (트렌드 있는 키워드만).
     """
     since = now - timedelta(hours=config.TREND_LOOKBACK_HOURS)
     result = {}
@@ -250,8 +250,15 @@ def dispatch_one(sub, now=None, trend_cache=None):
         sub.keywords, sub.summary_length, sub.language, now=now, hours=hours
     )
     digests, sent_links = _drop_seen_articles(digests, sub.email)  # 이미 본 기사 제거
-    trends = (weekly_trend_articles_for(sub.keywords, now, language=sub.language, cache=trend_cache)
-              if is_weekly_anchor(sub, now) else {})
+    try:
+        trends = (weekly_trend_articles_for(sub.keywords, now, language=sub.language, cache=trend_cache)
+                  if is_weekly_anchor(sub, now) else {})
+    except Exception as exc:
+        # 주간 트렌드 집계(DB 조회)가 이미 준비된 일간 메일 발송(아래) '이전'에 실행되므로,
+        # 여기서 예외가 나면 일간까지 통째로 못 나간다 — 주간은 회고성 부가물이라 격리해,
+        # 트렌드 집계가 실패해도 일간 발송은 그대로 진행되게 한다.
+        print(f"[주간 트렌드 집계 실패] {sub.email}: {exc}")
+        trends = {}
     if not digests and not trends:
         print(f"[발송 건너뜀] {sub.email}: 새 기사 없음")
         return

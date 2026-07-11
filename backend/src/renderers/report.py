@@ -71,7 +71,7 @@ def _trend_keyword_block(keyword, topics):
         rows.append(
             '<tr><td style="padding:10px 0; border-bottom:1px solid #eef1f5;">'
             f'<p class="text-title" style="margin:0 0 4px 0; color:#0a2540; font-size:15px; font-weight:700;">'
-            f'{html.escape(t.get("topic", ""))}</p>'
+            f'{html.escape(t.get("topic") or "")}</p>'
             f'<p class="text-body" style="margin:0 0 6px 0; color:#4a5568; font-size:14px; line-height:1.6;">{summary}</p>'
             f'{link_html}</td></tr>'
         )
@@ -88,7 +88,7 @@ def render_weekly_trend(trends, now=None):
     """주간 트렌드 키워드를 '토픽 + 요약 + 관련 기사'로 담은 '별도' 이메일 본문을 렌더링한다.
 
     일간 뉴스레터와 분리된 독립 메일이라 머리말/꼬리말(_HEAD/_TAIL)을 함께 붙여 완성된 HTML을 만든다.
-    trends: {keyword: [{"topic", "days", "summary", "links": [str,...]}, ...]}
+    trends: {keyword: [{"topic", "article_count", "summary", "links": [str,...]}, ...]}
         (pipeline.weekly_trend_articles_for). 비어 있으면 빈 문자열을 반환한다.
     관련 기사 링크는 그 주 다이제스트에 이미 저장된 것을 그대로 쓴다(추가 수집/LLM 없음).
     """

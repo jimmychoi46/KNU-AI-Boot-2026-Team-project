@@ -17,13 +17,21 @@ def main():
             print(f"[구독자 시드] 기존 JSON에서 {seeded}명 → DB")
 
     scheduler = BlockingScheduler(timezone=pytz.timezone(config.TIMEZONE))
+    # 공통 옵션: max_instances=1(한 잡이 겹쳐 도는 것 방지), coalesce=True(밀린 실행은 하나로 합침).
+    # 발송은 분 단위라 misfire_grace_time 을 넉넉히(55s) 둬서, 한 번의 발송이 조금 길어져도 그 분의
+    # 발송이 '미스파이어 1s' 기본값 때문에 통째로 버려지지 않게 한다(다음 분 대상 영구 누락 방지).
     scheduler.add_job(
-        collect_job, "interval", minutes=config.COLLECT_INTERVAL_MINUTES
+        collect_job, "interval", minutes=config.COLLECT_INTERVAL_MINUTES,
+        max_instances=1, coalesce=True,
     )  # 수집: 매 N분
     scheduler.add_job(
-        summarize_job, "interval", minutes=config.SUMMARIZE_INTERVAL_MINUTES
+        summarize_job, "interval", minutes=config.SUMMARIZE_INTERVAL_MINUTES,
+        max_instances=1, coalesce=True,
     )  # 요약: 매 N분
-    scheduler.add_job(dispatch_job, "cron", minute="*")  # 발송: 매 분
+    scheduler.add_job(
+        dispatch_job, "cron", minute="*",
+        max_instances=1, coalesce=True, misfire_grace_time=55,
+    )  # 발송: 매 분
     print(
         f"스케줄러 시작 ({config.TIMEZONE}): "
         f"수집=매 {config.COLLECT_INTERVAL_MINUTES}분, "
