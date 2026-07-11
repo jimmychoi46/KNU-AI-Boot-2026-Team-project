@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS articles (
     description  TEXT,
     published_at TEXT,                 -- ISO 8601 (수집 단계에서 날짜 불명 기사는 이미 걸러짐)
     collected_at TEXT    NOT NULL,     -- ISO 8601
-    simhash      TEXT,                 -- 제목+요약 SimHash(16진수) - 근접 중복(같은 안건) 판정용
+    simhash      TEXT,                 -- 제목+본문 스니펫(description) SimHash(16진수) - 근접 중복(같은 안건) 판정용
     UNIQUE(keyword, link)
 );
 
@@ -141,7 +141,7 @@ _COLUMN_MIGRATIONS = {
         "latest_article_at": "TEXT",  # 스냅샷이 담은 기사 중 가장 최근 발행일(발송 포함 기간 판정용)
     },
     "articles": {
-        "simhash": "TEXT",  # 제목+요약 SimHash - 근접 중복(같은 안건) 판정용
+        "simhash": "TEXT",  # 제목+본문 스니펫(description) SimHash - 근접 중복(같은 안건) 판정용
     },
     "sent_articles": {
         "simhash": "TEXT",  # 발송한 기사의 SimHash - 다음 발송의 근접 중복 판정용
@@ -565,7 +565,7 @@ _SIMHASH_BITS = 64
 
 
 def _simhash(text):
-    """제목+요약 텍스트의 문자 3-gram SimHash(64비트, 16진수 문자열). 근접 중복(같은 안건) 탐지용.
+    """제목+본문 스니펫(description) 텍스트의 문자 3-gram SimHash(64비트, 16진수 문자열). 근접 중복(같은 안건) 탐지용.
 
     결정론적 해시(blake2b)라 실행/프로세스마다 값이 같다 - DB 에 저장해두고 다음 발송과 비교한다.
     문자 3-gram 이라 한국어 형태소 분석 없이도 '거의 같은 글'이 작은 Hamming 거리를 갖는다.
@@ -632,7 +632,7 @@ def fetch_seen_or_similar(email, links, path=None):
     두 층을 합친다:
       1) 완전 일치 - 정규화 링크가 발송 내역에 있음(fetch_seen_links, 기존 재발송 방지).
       2) 근접 중복 - 그 링크 기사의 SimHash 가 이 사람이 이미 받은 기사 SimHash 와
-         Hamming <= NEAR_DUP_HAMMING_MAX. 링크가 달라도 제목+요약이 거의 같은 전재/경미
+         Hamming <= NEAR_DUP_HAMMING_MAX. 링크가 달라도 제목+본문 스니펫(description)이 거의 같은 전재/경미
          수정 기사를 같은 안건으로 본다. 임계값을 작게 둬 서로 다른 안건 오합병(진짜 뉴스
          누락)을 피한다.
     반환: 입력 links(원본) 중 빼야 할 링크 set. 근접 중복 조회가 실패하면(락 등) 완전 일치분만

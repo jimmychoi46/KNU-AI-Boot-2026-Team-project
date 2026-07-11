@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+from decimal import Decimal, InvalidOperation
 
 import openai
 
@@ -34,19 +35,23 @@ def _build_context(cleaned_items):
     return cleaned_text, original_links
 
 
-_NUM_RE = re.compile(r"\d[\d,.]*")
+# 숫자 토큰: 정수부 + 선택적 천단위 콤마(,\d{3}) + 선택적 소수부. 콤마는 '천단위 구분'일 때만
+# 한 토큰으로 묶고(7,400), '3,4,5' 같은 나열은 3·4·5 개별 숫자로 분리해 잡는다(오탐 방지).
+_NUM_RE = re.compile(r"\d+(?:,\d{3})*(?:\.\d+)?")
 
 
 def _canon_num(m):
-    """숫자 토큰을 대조용으로 정규화한다: 콤마 제거(7,400==7400), 양끝 점 제거,
-    정수는 앞자리 0 제거('07'==7). 발행일이 ISO 라 '07' 로 들어와도 요약이 자연스러운
-    한국어로 '7월'처럼 앞자리 0 없이 인용하면 같은 값으로 대조돼 거짓 양성이 안 난다.
-    소수는 앞자리 0 을 건드리지 않는다('0.5' 유지)."""
+    """숫자 토큰을 대조용으로 정규화해 '같은 값'을 같은 문자열로 만든다: 천단위 콤마 제거
+    (7,400==7400), 양끝 점 제거, 정수는 앞자리 0 제거('07'==7 — 발행일 ISO '07'을 요약이
+    '7월'로 인용해도 접지), 소수는 값 기준 정규화(3.5==3.50, 2.0==2)로 표기 차이 오탐을 막는다."""
     n = m.replace(",", "").strip(".")
     if not n:
         return None
     if "." in n:
-        return n
+        try:
+            return format(Decimal(n).normalize(), "f")  # 3.50→3.5, 2.0→2, 10.0→10 (지수표기 방지)
+        except InvalidOperation:
+            return n
     return n.lstrip("0") or "0"
 
 
