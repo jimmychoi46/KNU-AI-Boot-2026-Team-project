@@ -3,7 +3,7 @@
 실서버 없이 utils 함수의 계약을 값 수준으로 검증한다:
 URL 인코딩 / 서버오류↔코드오류 구분(튜플) / 대소문자 정규화 / 부분실패 안내 / 429 / 옵션 캐시.
 
-실행:  (newsletter_project 에서)  python -m pytest tests/test_utils_smoke.py -v
+실행:  (frontend 에서)  python -m pytest tests/test_utils_smoke.py -v
 """
 import os
 import sys
