@@ -554,8 +554,11 @@ def _normalize_link(link):
         (k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
         if not k.lower().startswith(_TRACKING_PARAM_PREFIXES) and k.lower() not in _TRACKING_PARAMS
     )
-    path = parts.path.rstrip("/") or parts.path
-    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, urlencode(query), ""))
+    # 경로 양끝 공백을 rstrip('/') '전에' 제거한다 — 스킴/호스트 없는 비정상 입력('abc/ #5' 등)에서
+    # 공백을 나중에 없애면 그때 드러난 끝 슬래시가 남아 norm(norm(x)) != norm(x) 가 된다.
+    # 이 순서라야 멱등이 보장된다(정상 URL 은 경로에 공백이 없어 영향 없음).
+    path = parts.path.strip().rstrip("/") or parts.path.strip()
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, urlencode(query), "")).strip()
 
 
 _SIMHASH_BITS = 64
