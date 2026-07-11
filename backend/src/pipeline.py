@@ -120,15 +120,15 @@ def summarize_job(now=None):
         collected = {keyword: articles}
         try:
             summarized = summarizer.summarize(collected, summary_length, language)
-        except Exception as exc:  # 한 조합의 LLM 실패가 나머지 조합 요약을 막지 않도록 격리
+            # 이 스냅샷이 담은 기사 중 가장 최근 발행일 — 발송 시 '새 기사가 있을 때만' 보내는 판정에 쓴다.
+            latest_article_at = max((a.get("published_at") for a in articles if a.get("published_at")),
+                                    default=None)
+            digest_id = db.save_digest(keyword, summary_length, language,
+                                        summarized.get(keyword, []), now=now,
+                                        latest_article_at=latest_article_at)
+        except Exception as exc:  # 한 조합의 LLM·DB 실패가 나머지 조합 요약을 막지 않도록 격리(save_digest 도 try 안)
             print(f"[요약 실패] {keyword} ({summary_length}/{language}): {exc}")
             continue
-        # 이 스냅샷이 담은 기사 중 가장 최근 발행일 — 발송 시 '새 기사가 있을 때만' 보내는 판정에 쓴다.
-        latest_article_at = max((a.get("published_at") for a in articles if a.get("published_at")),
-                                default=None)
-        digest_id = db.save_digest(keyword, summary_length, language,
-                                    summarized.get(keyword, []), now=now,
-                                    latest_article_at=latest_article_at)
         if digest_id is not None:
             created += 1
             print(f"[요약 잡] {keyword} ({summary_length}/{language}) → "

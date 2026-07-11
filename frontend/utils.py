@@ -364,6 +364,8 @@ def get_options():
             data = resp.json() if resp.status_code == 200 else {}
         except (requests.RequestException, ValueError):
             data = {}
+        if not isinstance(data, dict):  # 200 이어도 본문이 dict 가 아니면(배열/문자열/숫자/null) 폴백 — data.get() 크래시 방지
+            data = {}
         _OPTIONS_CACHE = {k: (data.get(k) or fallback[k]) for k in fallback}
     return _OPTIONS_CACHE
 

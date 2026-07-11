@@ -31,9 +31,22 @@ if not admin_password:
     st.info("관리자 비밀번호를 입력하세요.")
     st.stop()
 
-# 관리자 비밀번호의 진실 원천은 백엔드(.env ADMIN_PASSWORD) 하나다. 프론트에 별도 secrets.toml
-# 게이트를 두면 두 값이 어긋나 먹통이 되거나(이중 관리), secrets.toml 미설정 시 페이지가
-# 트레이스백으로 죽는다 — 대신 입력값을 GET /subscribers 호출로 검증한다(401이면 틀린 비번).
+# 입력받은 비밀번호를 프론트 .streamlit/secrets.toml 의 admin_password 와 대조한다(관리자 게이트).
+# secrets.toml 이 없거나 admin_password 가 비어 있으면 트레이스백으로 죽지 않고 안내 후 멈춘다.
+try:
+    _expected_admin_pw = st.secrets.get("admin_password")
+except Exception:
+    _expected_admin_pw = None
+if not _expected_admin_pw:
+    st.error("프론트 `.streamlit/secrets.toml` 에 `admin_password` 가 없습니다. "
+             "`secrets.toml.example` 을 복사해 백엔드 `.env` 의 `ADMIN_PASSWORD` 와 같은 값으로 채워 주세요.")
+    st.stop()
+if admin_password != _expected_admin_pw:
+    st.error("관리자 비밀번호가 올바르지 않습니다.")
+    st.stop()
+
+# 게이트를 통과하면 그 비밀번호로 백엔드 목록을 조회한다(같은 값을 X-Admin-Password 로 전달).
+# secrets.toml 의 admin_password 는 백엔드 .env 의 ADMIN_PASSWORD 와 같아야 조회까지 성공한다.
 # (캐시: 같은 비번으로 재실행하면 재조회하지 않아 반복 호출/속도 제한을 줄인다.)
 if st.session_state.get("dashboard_admin_pw") != admin_password:
     _df, _error = load_subscribers(admin_password)

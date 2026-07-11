@@ -65,6 +65,29 @@ def _looks_like_email(email):
     return bool(_EMAIL_RE.match(email)) # 이메일 형식이 _EMAIL_RE에 정의된 형식인지 확인, 형식이 일치하면 True, 불일치 시 False
 
 
+# 제어문자(C0/C1·DEL)와 양방향/서식/제로폭 등 '보이지 않는' 유니코드 서식 문자를 제거한다.
+# 이름·키워드·이메일에 섞이면 로그(ANSI 시퀀스) 오염·표시 무결성 훼손·이메일 시각적
+# 스푸핑(RTL 오버라이드 U+202E)에 악용될 수 있어, 정규화·정리 단계에서 없앤다(정상 입력엔 영향 없음).
+# 범위를 코드포인트로 구성한다 — 소스에 보이지 않는 문자를 직접 박아 넣으면 편집·리뷰가 어렵기 때문.
+_CONTROL_RANGES = (
+    (0x00, 0x1F), (0x7F, 0x9F),           # C0 / DEL / C1
+    (0xAD, 0xAD),                         # SOFT HYPHEN
+    (0x61C, 0x61C),                       # ARABIC LETTER MARK (양방향)
+    (0x180E, 0x180E),                     # MONGOLIAN VOWEL SEPARATOR
+    (0x200B, 0x200F),                     # 제로폭 + LRM/RLM
+    (0x202A, 0x202E),                     # 양방향 임베딩/오버라이드(RLO 등)
+    (0x2060, 0x2064), (0x2066, 0x206F),   # WORD JOINER·불가시 연산자 + 양방향 격리
+    (0xFEFF, 0xFEFF),                     # BOM (제로폭 no-break space)
+)
+_CONTROL_RE = re.compile(
+    "[" + "".join(f"{chr(lo)}-{chr(hi)}" for lo, hi in _CONTROL_RANGES) + "]"
+)
+
+
+def _strip_controls(text):
+    return _CONTROL_RE.sub("", str(text))
+
+
 def normalize_email(email):
     """이메일을 식별자로 쓰기 전 항상 거치는 정규화(대소문자 무시).
 
@@ -72,7 +95,7 @@ def normalize_email(email):
     'Alice@Example.com'과 'alice@example.com'을 서로 다른 구독자로 만들지 않기 위해
     조회/저장/URL 경로 파라미터 등 이메일이 등장하는 모든 지점에서 이 함수를 거친다.
     """
-    return str(email).strip().casefold()  # lower() 대신 casefold — 유니코드 케이스 폴딩(ß 등)까지 동일 취급
+    return _strip_controls(email).strip().casefold()  # 제어/양방향 문자 제거 후, lower() 대신 casefold(ß 등 유니코드 케이스 폴딩)
 
 
 def _clean_keywords(keywords):
@@ -88,7 +111,7 @@ def _clean_keywords(keywords):
         keywords = []
     cleaned = []                        # 정리된 키워드를 담을 빈 리스트 정의
     for k in keywords:
-        k = str(k).strip()              # k를 문자열로 변환한 뒤, 공백 제거 수행
+        k = _strip_controls(k).strip()  # 제어/양방향 문자 제거 후 공백 제거
         if k and k not in cleaned:      # k가 존재하고 이미 cleaned에 존재하지 않는 경우 추가
             cleaned.append(k)
     return cleaned
@@ -115,7 +138,7 @@ def _from_row(row):
         keywords=keywords,
         send_hour=send_hour,
         send_minute=send_minute,
-        name=str(row.get("name", "")).strip(),
+        name=_strip_controls(row.get("name", "")).strip(),
         frequency=_pick(row.get("frequency"), config.FREQUENCY, config.FREQUENCY[0]),
         summary_length=_pick(row.get("summary_length"), config.SUMMARY_LENGTH, config.SUMMARY_LENGTH[0]),
         language=_pick(row.get("language"), config.LANGUAGE, config.LANGUAGE[0]),
@@ -188,7 +211,7 @@ def save_subscription(record, path=None):
     # 정리 후엔 상한 이내인 값이 오거부되지 않도록(검증 기준과 저장 기준을 일치).
     if len(normalize_email(record.get("email") or "")) > 254:
         raise ValueError("이메일이 너무 깁니다(최대 254자)")
-    if len(str(record.get("name") or "").strip()) > 100:
+    if len(_strip_controls(record.get("name") or "").strip()) > 100:  # 저장되는 값(_from_row 와 동일한 제어문자 제거·strip 후) 기준
         raise ValueError("이름이 너무 깁니다(최대 100자)")
     _kws = _clean_keywords(record.get("keywords"))
     if len(_kws) > 50:

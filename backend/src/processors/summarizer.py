@@ -166,9 +166,10 @@ def summarize(collected, summary_length, language):
             if not isinstance(issue, dict):
                 logger.warning(f"'{query}' - 이슈가 예상된 dict 형태가 아니라 건너뜁니다: {issue!r}")
                 continue
-            # headline/topic/summary 가 JSON null 이면 None 이 흘러든다 — DB NOT NULL INSERT 실패(IntegrityError로
-            # 요약 배치 중단)와 렌더의 html.escape(None) 크래시를 막으려 빈 문자열로 정규화한다.
-            headline = issue.get("headline") or ""
+            # headline/topic/summary 가 JSON null 이면 None 이, 숫자면 int/float 가 흘러든다 —
+            # DB NOT NULL INSERT 실패(IntegrityError로 요약 배치 중단)·렌더의 html.escape(None) 크래시,
+            # 그리고 아래 '문자열 + 문자열' 근거 검사에서의 TypeError 를 막으려 문자열로 정규화한다.
+            headline = str(issue.get("headline") or "")
             topics = issue.get("topics", [])
             articles = issue.get("articles", [])
 
@@ -197,8 +198,8 @@ def summarize(collected, summary_length, language):
             # 버려지므로, 이슈의 모든 주제(topic)마다 유효 링크 전체를 행으로 펼친다
             # (db.group_digest_rows 가 같은 headline/topic 의 행들을 링크 리스트로 다시 묶는다).
             for topic in topics:
-                topic_summary = topic.get("summary") or ""
-                subtitle = topic.get("subtitle") or ""
+                topic_summary = str(topic.get("summary") or "")   # 숫자/None 이 와도 아래 근거 검사·렌더에서 안전하게
+                subtitle = str(topic.get("subtitle") or "")
                 # 숫자 근거 백스톱 — 주제 제목·요약·이슈 제목 어디든 원문에 없는 수치가 있으면 그 topic 을 버린다.
                 # subtitle 은 카드 제목(뉴스_제목)으로 독자에게 노출되므로 반드시 함께 검사한다.
                 # 잘못된 숫자를 보내느니 그 항목을 누락하는 편이 낫다(가독성 기준 ①정확성: 자동 발송 금지).
