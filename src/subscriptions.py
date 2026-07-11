@@ -310,7 +310,10 @@ def send_window_hours(sub, now):
     weekdays = config.FREQUENCY_WEEKDAYS.get(sub.frequency)
     if not weekdays:
         return config.SUMMARY_RECENCY_HOURS
-    today = now.weekday()
+    # send_hour=24 는 라벨 요일의 '다음날 0시'에 발송되므로 now.weekday()가 라벨보다 하루 앞선다.
+    # is_due·is_weekly_anchor 와 동일하게 하루 당겨 '직전 발송 요일'을 라벨 기준으로 찾는다 —
+    # 안 그러면 매주(월)·주3회 24:00 구독자의 되돌아보기 창이 항상 24h로 붕괴한다.
+    today = (now.weekday() - 1) % 7 if sub.send_hour == 24 else now.weekday()
     for gap in range(1, 8):
         if (today - gap) % 7 in weekdays:
             return gap * 24

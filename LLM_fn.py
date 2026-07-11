@@ -120,7 +120,7 @@ def _validate_links(issues, original_links):
     filtered_issues = []
 
     for issue in issues:
-        articles = issue.get("articles", [])
+        articles = issue.get("articles") or []   # JSON null 이면 [] (None 순회 TypeError 방지)
         valid = [link for link in articles if link in original_links]
         invalid_links.extend(link for link in articles if link not in original_links)
         filtered_issues.append({**issue, "articles": valid})
@@ -333,7 +333,7 @@ def analyze_news(raw_json_data, language="한국어", length="중간"):
         # QA 호출 실패(API)·비유효 JSON·빈 응답(json.loads(None)의 TypeError)이면 초안으로
         # 대체(degrade)한다 — 그 외 코드 버그는 여기서 삼키지 않고 그대로 드러난다.
         logger.error(f"[QA Agent] 실행 실패, 요약 Agent의 초안으로 대체합니다: {_safe_error_str(e)}")
-        final_issues = draft_json.get("issues", [])
+        final_issues = draft_json.get("issues", []) if isinstance(draft_json, dict) else []
         qa_report = ["QA Agent 실행 실패로 인해 1차 요약본이 그대로 사용되었습니다."]
 
     # QA/초안이 issues 를 null·비리스트로 주거나 dict 아닌 원소를 담아도 _validate_links(issue.get 호출)가

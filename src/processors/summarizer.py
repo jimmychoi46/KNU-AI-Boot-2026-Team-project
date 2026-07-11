@@ -37,17 +37,32 @@ def _build_context(cleaned_items):
 _NUM_RE = re.compile(r"\d[\d,.]*")
 
 
-def _ungrounded_numbers(text, src_digit_blob):
-    """text 의 숫자 토큰 중 원문 숫자열(src_digit_blob)에 없는 것 — 환각 수치 후보를 반환.
+def _source_numbers(items):
+    """원문(제목+내용+발행일)에 실제로 등장하는 숫자 토큰의 집합. 요약이 이 집합에 없는 수치를
+    쓰면 환각으로 본다(콤마 무시: 7,400==7400).
 
     링크 무결성(_validate_links)이 '원문에 없는 링크'를 코드로 제거하듯, '원문에 없는 숫자'를
-    코드로 잡는 결정적 백스톱이다(프롬프트 규칙 5-1 과 이중 방어). 콤마는 무시하고(7,400==7400)
-    부분 문자열로 대조해, 원문에 명시된 수치는 통과시키고 지어낸 수치(예: 2.9%, 7400선)만 잡는다.
+    코드로 잡는 결정적 백스톱이다(프롬프트 규칙 5-1 과 이중 방어). '부분 문자열'이 아니라 '토큰
+    일치'로 대조한다 — 예전엔 원문 숫자열에 부분 문자열이 있으면 통과시켜, 실재하는 큰 수(27400)
+    의 일부(740)를 지어낸 것을 놓쳤다(거짓 음성). 발행일 숫자(연도 등)도 포함해, 프롬프트에
+    근거로 준 발행연도를 요약이 인용해도 거짓 양성이 나지 않게 한다.
     """
+    nums = set()
+    for it in items:
+        blob = f"{it.get('title', '')} {it.get('description', '')} {it.get('published_at', '')}"
+        for m in _NUM_RE.findall(blob):
+            norm = m.replace(",", "").strip(".")
+            if norm:
+                nums.add(norm)
+    return nums
+
+
+def _ungrounded_numbers(text, src_numbers):
+    """text 의 숫자 토큰 중 원문 숫자 집합(src_numbers)에 없는 것 — 환각 수치 후보를 반환."""
     bad = []
     for m in _NUM_RE.findall(text or ""):
         norm = m.replace(",", "").strip(".")
-        if norm and norm not in src_digit_blob:
+        if norm and norm not in src_numbers:
             bad.append(m)
     return bad
 
@@ -84,9 +99,8 @@ def summarize(collected, summary_length, language):
 
     for query, items in collected.items():
         news_context, original_links = _build_context(items)
-        # 숫자 환각 방지용 원문 숫자열(제목+내용, 콤마·공백 제거) — 아래 행 생성 시 근거 대조에 쓴다.
-        src_digit_blob = re.sub(r"[,\s]", "", " ".join(
-            (it.get("title", "") + " " + it.get("description", "")) for it in items))
+        # 숫자 환각 방지용 원문 숫자 집합(제목+내용+발행일) — 아래 행 생성 시 근거 대조에 쓴다.
+        src_numbers = _source_numbers(items)
 
         if not news_context:
             logger.warning(f"'{query}' 쿼리에 대해 처리할 뉴스가 없습니다.")
@@ -169,7 +183,7 @@ def summarize(collected, summary_length, language):
                 topic_summary = topic.get("summary") or ""
                 # 숫자 근거 백스톱 — 요약/제목에 원문에 없는 수치가 있으면 그 topic 을 버린다.
                 # 잘못된 숫자를 보내느니 그 항목을 누락하는 편이 낫다(가독성 기준 ①정확성: 자동 발송 금지).
-                ungrounded = _ungrounded_numbers(topic_summary + " " + headline, src_digit_blob)
+                ungrounded = _ungrounded_numbers(topic_summary + " " + headline, src_numbers)
                 if ungrounded:
                     logger.warning(
                         f"'{query}' - '{headline}' 요약에 원문에 없는 수치 {ungrounded} 감지 → 이 topic 제외(환각 방지)")

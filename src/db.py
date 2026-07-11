@@ -178,7 +178,7 @@ def _normalize_email_casing(conn):
     rows = conn.execute("SELECT * FROM subscribers").fetchall()
     groups = {}
     for row in rows:
-        groups.setdefault(row["email"].strip().lower(), []).append(row)
+        groups.setdefault(row["email"].strip().casefold(), []).append(row)  # 런타임 normalize_email(casefold)과 동일 규칙
 
     for lower_email, group in groups.items():
         group.sort(key=lambda r: (r["confirmed"], r["updated_at"] or ""), reverse=True)
@@ -244,7 +244,14 @@ def upsert_subscriber(record, now=None, path=None):
                   frequency=excluded.frequency,
                   summary_length=excluded.summary_length,
                   language=excluded.language,
-                  updated_at=excluded.updated_at""",
+                  updated_at=excluded.updated_at,
+                  -- 미확인인데 토큰이 없는 경우에만 새 토큰을 발급한다. 확인 전 컬럼이 나중에
+                  -- 추가돼(마이그레이션) 기존 행이 confirmed=0·token=NULL 로 남으면, 재구독해도
+                  -- 토큰이 안 나와 확인 메일이 영영 안 가고 복구 경로가 없던 문제를 막는다.
+                  -- (미확인+토큰 有 → 기존 토큰 재사용 / 확인됨 → NULL 유지)
+                  confirm_token=CASE
+                      WHEN subscribers.confirmed = 0 AND subscribers.confirm_token IS NULL
+                      THEN excluded.confirm_token ELSE subscribers.confirm_token END""",
             {
                 "email": record["email"],
                 "name": record.get("name", ""),
@@ -1046,5 +1053,7 @@ def _is_recent(iso, cutoff):
         return False
     try:
         return datetime.fromisoformat(iso) >= cutoff
-    except ValueError:
+    except (ValueError, TypeError):
+        # naive(오프셋 없는) ISO 는 fromisoformat 은 성공하나 aware cutoff 와 비교 시 TypeError.
+        # 계약(파싱/비교 실패는 False, 예외 안 던짐)을 지켜 발송 틱이 죽지 않게 한다.
         return False

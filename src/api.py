@@ -4,7 +4,7 @@ import logging
 from contextlib import asynccontextmanager
 from urllib.parse import quote
 
-from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Query, Request, Response, Security
+from fastapi import BackgroundTasks, Depends, FastAPI, Form, HTTPException, Query, Request, Response, Security
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
@@ -35,11 +35,13 @@ _access_code_header = APIKeyHeader(name="X-Access-Code", auto_error=False)
 # 가입/인증코드 발송/본인확인 엔드포인트는 인증 없이 호출 가능해 무차별 대입(코드 브루트포스)·
 # 메일 폭탄의 표적이 된다. IP 기준으로 속도를 제한해 두 위험을 함께 줄인다.
 def _client_ip(request):
-    """rate limit 키용 클라이언트 IP. 리버스 프록시가 있으면 X-Forwarded-For 의 첫 IP(실제 클라이언트),
-    없으면 소켓 주소. (프록시 없는 로컬/직결에서는 소켓 주소 그대로.)"""
-    xff = request.headers.get("X-Forwarded-For")
-    if xff:
-        return xff.split(",")[0].strip()
+    """rate limit 키용 클라이언트 IP(소켓 주소).
+
+    X-Forwarded-For 는 클라이언트가 임의로 넣을 수 있어(스푸핑), 요청마다 값을 바꿔 IP 버킷을
+    무한 생성하면 속도 제한을 통째로 우회할 수 있다 — 그래서 이 헤더를 직접 신뢰하지 않는다.
+    신뢰 가능한 리버스 프록시 뒤에 배포한다면 프록시가 검증한 XFF 가 소켓 주소에 반영되도록
+    uvicorn 의 --forwarded-allow-ips 로 켠다(코드가 아니라 배포 설정에서 처리).
+    """
     return get_remote_address(request)
 
 
@@ -393,9 +395,24 @@ def subscriber_stats(request: Request, password: str | None = Security(_admin_pa
     return SubscriberStatsOut(**db.subscriber_stats())
 
 
+def _rate_key_create(request):
+    """POST /subscribers 는 본문 이메일(피해자)을 키로 삼는다. 서버-대-서버 프론트라 IP 로 묶으면
+    모든 신규 가입이 한 버킷(시간당 5건)을 공유해 정상 가입도 6번째부터 막히고, 한 피해자에게
+    확인 메일을 무한 발송하는 것도 못 막는다. 아래 _stash_create_email 이 request.state 에 심어둔
+    정규화 이메일을 쓰고, 없으면 IP 로 폴백한다."""
+    return getattr(request.state, "rl_email", None) or _client_ip(request)
+
+
+def _stash_create_email(request: Request, payload: SubscriberIn):
+    """create_subscriber 의 속도 제한이 본문 이메일을 키로 쓰도록, 정규화한 이메일을 request.state 에
+    심는다(slowapi key_func 는 파싱된 본문에 직접 접근할 수 없어 의존성으로 넘긴다)."""
+    request.state.rl_email = subscriptions.normalize_email(payload.email)
+
+
 @app.post("/subscribers", response_model=SubscriberOut, status_code=201, summary="구독 추가(신규 구독)")
-@limiter.limit("5/hour")
-def create_subscriber(request: Request, payload: SubscriberIn, background_tasks: BackgroundTasks):
+@limiter.limit("5/hour", key_func=_rate_key_create)
+def create_subscriber(request: Request, payload: SubscriberIn, background_tasks: BackgroundTasks,
+                      _: None = Depends(_stash_create_email)):
     """구독자를 새로 추가한다.
 
     이미 확인(confirmed)된 이메일로 다시 신청하면 409. 아직 미확인 상태인 이메일로
