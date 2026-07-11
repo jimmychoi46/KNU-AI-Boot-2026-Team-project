@@ -198,9 +198,11 @@ def summarize(collected, summary_length, language):
             # (db.group_digest_rows 가 같은 headline/topic 의 행들을 링크 리스트로 다시 묶는다).
             for topic in topics:
                 topic_summary = topic.get("summary") or ""
-                # 숫자 근거 백스톱 — 요약/제목에 원문에 없는 수치가 있으면 그 topic 을 버린다.
+                subtitle = topic.get("subtitle") or ""
+                # 숫자 근거 백스톱 — 주제 제목·요약·이슈 제목 어디든 원문에 없는 수치가 있으면 그 topic 을 버린다.
+                # subtitle 은 카드 제목(뉴스_제목)으로 독자에게 노출되므로 반드시 함께 검사한다.
                 # 잘못된 숫자를 보내느니 그 항목을 누락하는 편이 낫다(가독성 기준 ①정확성: 자동 발송 금지).
-                ungrounded = _ungrounded_numbers(topic_summary + " " + headline, src_numbers)
+                ungrounded = _ungrounded_numbers(subtitle + " " + topic_summary + " " + headline, src_numbers)
                 if ungrounded:
                     logger.warning(
                         f"'{query}' - '{headline}' 요약에 원문에 없는 수치 {ungrounded} 감지 → 이 topic 제외(환각 방지)")
@@ -208,7 +210,7 @@ def summarize(collected, summary_length, language):
                 for link in (valid_links or [""]):
                     rows.append({
                         "headline": headline,
-                        "topic": topic.get("subtitle") or "",
+                        "topic": subtitle,
                         "topic_summary": topic_summary,
                         "link": link,
                     })
