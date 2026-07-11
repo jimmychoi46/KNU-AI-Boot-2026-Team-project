@@ -19,7 +19,11 @@ def main():
     scheduler = BlockingScheduler(timezone=pytz.timezone(config.TIMEZONE))
     # 공통 옵션: max_instances=1(한 잡이 겹쳐 도는 것 방지), coalesce=True(밀린 실행은 하나로 합침).
     # 발송은 분 단위라 misfire_grace_time 을 넉넉히(55s) 둬서, 한 번의 발송이 조금 길어져도 그 분의
-    # 발송이 '미스파이어 1s' 기본값 때문에 통째로 버려지지 않게 한다(다음 분 대상 영구 누락 방지).
+    # 발송이 '미스파이어 1s' 기본값 때문에 통째로 버려지지 않게 한다.
+    # (한계) 이 55s 는 '같은 분 안의 지연'만 구제한다. 프로세스가 분 경계를 넘겨(예: 시스템 슬립)
+    # 1분 넘게 멈췄다 재개하면, 밀린 :00 실행이 coalesce 로 나중 run_time 하나로 합쳐지고 dispatch_job
+    # 이 벽시계 now() 로 판정하기 때문에(scheduled run_time 미사용) 그 슬롯 대상은 그날 누락된다.
+    # 완전한 구제는 dispatch_job 이 scheduled run_time 을 받아 그 분 기준으로 판정하도록 바꾸는 것.
     scheduler.add_job(
         collect_job, "interval", minutes=config.COLLECT_INTERVAL_MINUTES,
         max_instances=1, coalesce=True,
