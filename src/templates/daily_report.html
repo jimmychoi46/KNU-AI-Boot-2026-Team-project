@@ -9,13 +9,13 @@
 ========================================================
 -->
 <!DOCTYPE html>
-<html lang="ko">
+<html lang="{{언어코드}}">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="color-scheme" content="light dark">
   <meta name="supported-color-schemes" content="light dark">
-  <title>트렌드 뉴스레터</title>
+  <title>{{뉴스레터_이름}}</title>
   <style>
     @media (prefers-color-scheme: dark) {
       .bg-outer    { background-color:#0a0e14 !important; }
@@ -110,7 +110,7 @@
                 <tr>
                   <td>
                     <a href="{{원문_링크}}" class="link-gold" style="color:#a6842f; font-size:14px; font-weight:700; text-decoration:none;">
-                      원문 보기 &rarr;
+                      {{원문_보기}}
                     </a>
                   </td>
                 </tr>
@@ -128,12 +128,12 @@
           <tr>
             <td class="bg-subtle" style="padding:28px 32px; background-color:#f7f8fa;">
               <p class="text-muted" style="margin:0 0 8px 0; color:#8792a3; font-size:13px; line-height:1.6;">
-                이 메일은 {{뉴스레터_이름}} 구독자에게 발송되었습니다.
+                {{푸터_안내}}
               </p>
               <p class="text-muted" style="margin:0; color:#8792a3; font-size:13px;">
-                <a href="{{구독취소_링크}}" style="color:#8792a3; text-decoration:underline;">구독 취소</a>
+                <a href="{{구독취소_링크}}" style="color:#8792a3; text-decoration:underline;">{{구독취소_라벨}}</a>
                 &nbsp;|&nbsp;
-                <a href="{{설정_링크}}" style="color:#8792a3; text-decoration:underline;">발송 설정</a>
+                <a href="{{설정_링크}}" style="color:#8792a3; text-decoration:underline;">{{설정_라벨}}</a>
               </p>
             </td>
           </tr>
