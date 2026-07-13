@@ -5,8 +5,8 @@ from decimal import Decimal, InvalidOperation
 
 import openai
 
-# LLM_fn.py에 이미 구현해 둔 요약 Agent / QA Agent / 길이 프리셋 / 안전 로그 포맷터를 그대로 재사용한다.
-from LLM_fn import _summarize_agent, _qa_agent, _safe_error_str, LENGTH_PRESETS
+# LLM_fn.py에 이미 구현해 둔 요약 Agent / QA Agent / 관련성 Agent / 길이 프리셋 / 안전 로그 포맷터를 그대로 재사용한다.
+from LLM_fn import _summarize_agent, _qa_agent, _relevance_agent, _safe_error_str, LENGTH_PRESETS
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,47 @@ def _ungrounded_numbers(text, src_numbers):
         if c and c not in src_numbers:
             bad.append(m)
     return bad
+
+
+def _relevant_items(keyword, items):
+    """items 중 keyword 가 가리키는 '주제'에 실제로 관한 기사만 남긴다(LLM 판정).
+
+    실패(키 없음·API 오류·형식 오류) 시엔 필터 없이 원본을 그대로 둔다(fail-open) — 관련성
+    판정은 품질 개선이지 정확성 보장이 아니라, 여기서 막히면 정상 발송까지 못 하는 게 더 나쁘다.
+    또 '전부 무관' 판정은 오판(모델 오작동·프롬프트 경계 케이스) 가능성이 커, 이 경우도 원본을
+    유지해 빈 뉴스레터를 막는다. 무엇을 왜 뺐는지는 로그로 남긴다(조용한 누락 금지).
+    """
+    if not items:
+        return list(items)
+    try:
+        keep = _relevance_agent(keyword, items)
+    except Exception as exc:  # 키 없음(RuntimeError)·API 오류·JSON 파싱 오류 등 → 필터 없이 진행
+        logger.warning(f"[관련성 필터] '{keyword}' 판정 실패 — 필터 없이 진행: {_safe_error_str(exc)}")
+        return list(items)  # 원본 객체가 아니라 사본을 돌려줘 호출부의 in-place 변형이 원본을 오염시키지 않게 한다
+    kept = [it for i, it in enumerate(items, 1) if i in keep]
+    dropped = [it.get("title", "") for i, it in enumerate(items, 1) if i not in keep]
+    if not kept:
+        # 판정이 모두 무관이면(그 키워드에 오늘 진짜 관련 뉴스가 없음) 빈 결과를 그대로 돌려준다 —
+        # 무관 기사로 채우느니 그 키워드는 이번에 안 보내는 게 낫다(파이프라인이 '뉴스 없음'으로 건너뜀).
+        # 'MBTI'처럼 언급만 되는 키워드는 관련 뉴스가 아예 없는 날이 흔하다. LLM 오작동 가능성도 있어
+        # 원인 파악용으로 경고를 남긴다(조용한 전량 누락 방지). 단, 판정 '실패'(위 except)와는 구분한다.
+        logger.warning(f"[관련성 필터] '{keyword}' 모든 기사가 주제와 무관 → 이 키워드는 이번 발송에서 제외({len(items)}건)")
+        return []
+    if dropped:
+        logger.info(f"[관련성 필터] '{keyword}' 주제와 무관해 {len(dropped)}건 제외: {dropped}")
+    return kept
+
+
+def filter_relevant(collected):
+    """{query: [cleaned_item]} 에서 각 키워드 '주제'와 무관한 기사를 걸러낸다.
+
+    수집(naver_news.collect)과 요약/저장 사이에 두는 정제 단계. 네이버 뉴스 검색은 본문 문자열을
+    매칭하므로, 'LOL'처럼 중의적인 키워드(게임 '리그 오브 레전드' vs 슬랭 '웃기다')로 수집하면
+    그 문자열이 슬랭·약어로 쓰인 무관 기사가 섞여 들어온다 — 이를 키워드 단위로 걸러낸다.
+    키워드마다 독립 판정하며, 한 키워드의 판정 실패가 다른 키워드를 막지 않는다(_relevant_items 가 fail-open).
+    입력과 같은 {query: [item]} 형태를 반환한다(호출부가 그대로 이어 쓸 수 있게).
+    """
+    return {keyword: _relevant_items(keyword, items) for keyword, items in collected.items()}
 
 
 def summarize(collected, summary_length, language):

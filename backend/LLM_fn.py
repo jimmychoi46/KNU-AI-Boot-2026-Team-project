@@ -279,6 +279,99 @@ def _qa_agent(draft_json, original_links, language, sentence_range, source_text=
 
 
 # ----------------------------------------------------
+# 관련성 Agent: 수집한 기사가 '구독 키워드가 가리키는 주제'에 실제로 관한 것인지 판정.
+# 'LOL'처럼 중의적인 키워드(게임 '리그 오브 레전드' vs 슬랭 '웃기다')로 수집하면 그 문자열이
+# 슬랭·약어로 쓰인 무관 기사가 섞여 들어오는데(네이버는 본문 문자열 매칭), 그걸 걸러낸다.
+# ----------------------------------------------------
+def _relevance_agent(keyword, items):
+    """구독 키워드(주제)에 대해, 각 뉴스가 그 주제에 실제로 '관한' 기사인지 판정한다.
+
+    args:
+        keyword(str): 구독자가 고른 관심 주제.
+        items(list[dict]): {"title", "description", ...} 형태의 정제된 뉴스 리스트.
+    returns:
+        set[int]: 관련 있다고 판정된 뉴스의 1-based 번호 집합.
+
+    키워드는 중의적일 수 있어(예: 'LOL' = 게임 '리그 오브 레전드' 또는 채팅 슬랭 '웃기다'),
+    단순히 키워드 문자열이 본문에 등장한다고 관련으로 보지 않는다 — 그 키워드가 가리키는 '주제'가
+    기사의 실제 소재일 때만 관련으로 본다. 애매하면 관련으로 남긴다(진짜 뉴스를 실수로 버리지 않도록).
+    뉴스 텍스트는 외부 수집 데이터라 <news_data> 로 감싸 인젝션을 막는다(요약/QA Agent 와 동일).
+    """
+    numbered = ""
+    for idx, it in enumerate(items, 1):
+        title = _strip_tags(it.get("title", ""))
+        description = _strip_tags(it.get("description", ""))
+        numbered += f"[{idx}번] 제목: {title}\n내용: {description}\n\n"
+
+    system_prompt = (
+        "너는 뉴스 큐레이터다. 구독자가 고른 '관심 주제(키워드)'와 뉴스 목록이 주어진다. "
+        "각 뉴스가 그 키워드가 가리키는 주제에 실제로 관한 기사인지 판정하는 것이 네 임무다.\n\n"
+
+        "[판정 규칙]\n"
+        "1. 관련이란 '기사가 그 키워드의 주제(분야)를 실제로 다루는 것'이다. 그 주제에 관한 "
+        "사건·대회·경기·인물·팀·제품·연구 기사는 모두 관련이다. "
+        "예: 키워드가 'LOL'(게임 '리그 오브 레전드')이면, 리그 오브 레전드 대회(MSI·EWC·LCK 등)· "
+        "팀·선수·경기 결과·업데이트 기사는 그 게임 자체가 주제이므로 전부 관련이다.\n"
+        "2. 반대로, 기사의 주제는 다른 것인데 키워드가 부수적 요소·홍보 장식·스쳐 지나가는 한두 문장 "
+        "언급·슬랭·동음이의어로만 끼어든 경우는 무관이다.\n"
+        "   예1: 키워드가 'MBTI'인데 '소주 병뚜껑에 MBTI 16종을 인쇄했다'는 신제품 출시 기사 → "
+        "기사 주제는 '소주 출시'이고 MBTI 는 홍보 장식이므로 무관.\n"
+        "   예2: 키워드가 'LOL'인데 다른 주제의 기사에서 누군가 '너무 웃기다(LOL)'처럼 슬랭으로만 쓴 경우 → 무관.\n"
+        "3. 애매하면 관련(포함)으로 판정하라 — 확실히 벗어난 것만 제외하고, 진짜 관련 있는 뉴스를 실수로 빼지 마라.\n\n"
+
+        "[출력 형식 - 매우 중요]\n"
+        "다른 설명, 인사말, 코드블록(백틱) 없이 아래 JSON 객체만 정확히 출력하라. "
+        "relevant 에는 관련 있다고 판정한 뉴스의 번호만 담아라(무관이면 빈 배열):\n"
+        '{"relevant": [1, 2, 4]}'
+        + SECURITY_GUARDRAIL
+    )
+
+    user_prompt = (
+        f"관심 주제(키워드): {keyword}\n\n"
+        "아래 <news_data> 안의 각 뉴스가 위 주제에 관한 기사인지 판정해줘.\n\n"
+        "<news_data>\n"
+        f"{numbered}"
+        "</news_data>"
+    )
+
+    response = _client().chat.completions.create(
+        model=MODEL_NAME,
+        temperature=0,  # 창작이 아니라 판정이므로 결정성을 높게
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        response_format={"type": "json_object"},
+    )
+    parsed = json.loads(response.choices[0].message.content)
+    # '전부 무관(빈 리스트)'과 '형식 오류'를 반드시 구분한다 — 형식이 어긋난 응답을 '무관'으로
+    # 오인하면 정상 기사를 통째로 버린다. 형식 오류(비-object·relevant 가 리스트 아님)는 예외를
+    # 던져 호출부(_relevant_items)가 fail-open(원본 유지)하게 하고, 오직 정상 리스트만 신뢰한다
+    # (빈 리스트는 '관련 없음'으로 그대로 존중해 그 키워드를 건너뛴다).
+    if not isinstance(parsed, dict):
+        raise ValueError("relevance 응답이 JSON 객체가 아닙니다")
+    rel = parsed.get("relevant")
+    if not isinstance(rel, list):
+        raise ValueError(f"relevance 응답의 relevant 가 리스트가 아닙니다: {type(rel).__name__}")
+    keep = set()
+    for x in rel:
+        if isinstance(x, bool):
+            continue  # bool 은 int 서브클래스라 int(True)=1 처럼 인덱스로 새어드는 것을 막는다
+        try:
+            f = float(x)
+        except (TypeError, ValueError):
+            continue  # 숫자로 못 읽는 값(문자열·null 등)은 무시
+        if f == int(f):  # 2.9 같은 비정수 인덱스는 조용히 절삭하지 않고 버린다(엉뚱한 기사 선택 방지)
+            keep.add(int(f))
+    # 리스트에 값은 있는데 유효한 정수 인덱스를 하나도 못 건졌다면(예: ["a","b"]) 이는 '전부 무관(빈 리스트)'이
+    # 아니라 형식 오류다 — '전부 무관'으로 오인해 그 키워드 기사를 통째로 버리지 않도록 예외로 승격한다
+    # (호출부 _relevant_items 가 fail-open 으로 원본을 유지). 빈 리스트([])만 '관련 없음'으로 존중한다.
+    if rel and not keep:
+        raise ValueError("relevant 리스트에서 유효한 정수 인덱스를 찾지 못했습니다")
+    return keep
+
+
+# ----------------------------------------------------
 # 메인 함수: 요약 Agent -> 편집/QA Agent 순으로 실행하는 파이프라인
 # ----------------------------------------------------
 def analyze_news(raw_json_data, language="한국어", length="중간"):
