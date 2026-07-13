@@ -10,14 +10,20 @@ from src.notifiers import send_email      # 백엔드
 from src.subscriptions import due_subscribers, is_weekly_anchor, load_subscriptions, send_window_hours
 
 
-def _daily_subject(sub):
-    """구독자의 실제 키워드로 일간 메일 제목을 만든다.
+def _daily_subject(sub, category_labels=None):
+    """구독자의 실제 키워드로 일간 메일 제목을 만든다(구독 언어에 맞춰).
 
     예전엔 dispatch_one 이 고정 분야명을 하드코딩하고 run_for_subscriber 는 키워드 리스트를 그대로 넣어
     (['주식'] 처럼) 파이썬 표기가 제목에 새어 나왔다 — 둘 다 구독 키워드를 반영하도록 통일한다.
+    영어면 category_labels({원키워드: 번역})로 제목 속 키워드도 번역한다(없으면 원 키워드 유지).
     """
+    en = sub.language == "영어"
     if not sub.keywords:
-        return "[데일리] 오늘의 뉴스 브리핑"
+        return "[Daily] Today's News Brief" if en else "[데일리] 오늘의 뉴스 브리핑"
+    if en:
+        cats = category_labels or {}
+        label = ", ".join(cats.get(k, k) for k in sub.keywords[:3]) + (" and more" if len(sub.keywords) > 3 else "")
+        return f"[Daily] Today's {label} News Brief"
     label = ", ".join(sub.keywords[:3]) + (" 외" if len(sub.keywords) > 3 else "")
     return f"[데일리] 오늘의 {label} 뉴스 브리핑"
 
@@ -56,13 +62,14 @@ def run_for_subscriber(sub):
         return
     digests = {kw: db.group_digest_rows(rows) for kw, rows in flat.items() if rows}
 
-    # 3. 렌더링 (기획/데이터 인터페이스)
-    body_html = report.render(digests)
+    # 3. 렌더링 (기획/데이터 인터페이스) — 템플릿 골격·카테고리 태그도 구독 언어로
+    cats = summarizer.translate_categories(list(digests.keys()), sub.language)
+    body_html = report.render(digests, language=sub.language, category_labels=cats)
 
     # 4. 발송 (백엔드)
     send_email.send_email(
         sub.email,
-        subject=_daily_subject(sub),
+        subject=_daily_subject(sub, cats),
         body_html=body_html,
     )
     print(f"[발송 완료] {sub.email} ({sub.send_hour:02d}:{sub.send_minute:02d})")
@@ -272,14 +279,16 @@ def dispatch_one(sub, now=None, trend_cache=None):
         # 정확히 한 쪽만 이 슬롯을 선점해 발송한다(원자적 조건부 UPDATE로 레이스 제거).
         print(f"[발송 건너뜀] {sub.email}: 방금 전 이미 발송함(중복 방지)")
         return
+    # 카테고리 태그도 구독 언어로 — 한 번만 번역해 일간·주간에 함께 쓴다(한국어면 즉시 빈 dict).
+    cats = summarizer.translate_categories(sub.keywords, sub.language)
     # 일간과 주간(별도 메일)을 각각 격리한다 — 하나의 claim 으로 묶여 있어도, 앞선 일간 발송이
     # SMTP 일시 오류로 실패했다고 뒤의 주간 트렌드 메일까지 통째로 못 나가는 일이 없도록.
     if digests:
         try:
             send_email.send_email(
                 sub.email,
-                subject=_daily_subject(sub),
-                body_html=report.render(digests, now=now),
+                subject=_daily_subject(sub, cats),
+                body_html=report.render(digests, now=now, language=sub.language, category_labels=cats),
             )
         except Exception as exc:
             print(f"[발송 실패] {sub.email} 일간: {exc}")
@@ -294,10 +303,12 @@ def dispatch_one(sub, now=None, trend_cache=None):
             print(f"[발송 완료] {sub.email} ({sub.send_hour:02d}:{sub.send_minute:02d})")
     if trends:
         try:
+            weekly_subject = ("[Weekly Trend] This week's keywords and related stories"
+                              if sub.language == "영어" else "[주간 트렌드] 이번 주 키워드와 관련 기사")
             send_email.send_email(
                 sub.email,
-                subject="[주간 트렌드] 이번 주 키워드와 관련 기사",
-                body_html=report.render_weekly_trend(trends, now=now),
+                subject=weekly_subject,
+                body_html=report.render_weekly_trend(trends, now=now, language=sub.language, category_labels=cats),
             )
             print(f"[주간 트렌드 발송] {sub.email} (키워드 {len(trends)}개)")
         except Exception as exc:
