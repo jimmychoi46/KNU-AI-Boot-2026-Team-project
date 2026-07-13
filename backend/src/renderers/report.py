@@ -59,7 +59,67 @@ def _split_item_block(template):
 _HEAD, _ITEM_BLOCK, _TAIL = _split_item_block(_TEMPLATE_PATH.read_text(encoding="utf-8"))
 
 
-def _trend_keyword_block(keyword, topics):
+# ── 언어별 템플릿 문구 ──────────────────────────────────────────
+# 뉴스 '내용'(headline/summary)은 요약 단계(summarizer)에서 구독자 언어로 생성되지만, 템플릿 '골격'
+# (뉴스레터 이름·날짜·안내 문구·버튼 라벨)은 하드코딩돼 있어 언어를 따라가지 못했다. 여기서 언어별로
+# 채운다. 지원하지 않는 언어는 한국어로 폴백한다. read_more/related/footer_sent 는 내가 통제하는 고정
+# 문구라(사용자 입력 아님) &rarr; 같은 엔티티를 그대로 넣는다(이스케이프하면 화살표가 깨진다).
+_MONTHS_EN = ["", "January", "February", "March", "April", "May", "June",
+              "July", "August", "September", "October", "November", "December"]
+
+_L10N = {
+    "한국어": {
+        "name": "트렌드 뉴스레터",
+        "lang": "ko",
+        "read_more": "원문 보기 &rarr;",
+        "footer_sent": "이 메일은 {name} 구독자에게 발송되었습니다.",
+        "unsubscribe": "구독 취소",
+        "settings": "발송 설정",
+        "related": "관련 기사 보기 &rsaquo;",
+        "brief_default": "오늘의 뉴스 브리핑",
+        "brief_multi": "{highlight} 외 총 {n}건의 뉴스를 정리했습니다.",
+        "weekly_brief": "이번 주 가장 많이 다뤄진 키워드와 관련 기사입니다.",
+    },
+    "영어": {
+        "name": "Trend Newsletter",
+        "lang": "en",
+        "read_more": "Read more &rarr;",
+        "footer_sent": "This email was sent to subscribers of {name}.",
+        "unsubscribe": "Unsubscribe",
+        "settings": "Email preferences",
+        "related": "Related articles &rsaquo;",
+        "brief_default": "Today's news brief",
+        "brief_multi": "{highlight} and {n} news items in total.",
+        "weekly_brief": "The most-covered keywords and related stories this week.",
+    },
+}
+
+
+def _texts(language):
+    """언어별 템플릿 문구 묶음. 미지원 언어는 한국어로 폴백한다."""
+    return _L10N.get(language, _L10N["한국어"])
+
+
+def _fmt_date(now, language):
+    """발송 날짜 표기: 영어는 'July 13, 2026', 그 외(한국어)는 '2026년 07월 13일'.
+    (strftime('%B') 는 OS 로케일 의존이라 안 쓰고 영어 월 이름을 직접 매핑한다.)"""
+    if language == "영어":
+        return f"{_MONTHS_EN[now.month]} {now.day}, {now.year}"
+    return now.strftime("%Y년 %m월 %d일")
+
+
+def _tail_values(t):
+    """_TAIL(푸터) 채울 값 — 언어별 안내 문구·라벨 + 링크. footer_sent 안의 {name} 은 미리 채운다."""
+    return {
+        "푸터_안내": t["footer_sent"].format(name=html.escape(t["name"])),
+        "구독취소_라벨": t["unsubscribe"],
+        "설정_라벨": t["settings"],
+        "구독취소_링크": _escaped_href(f"{FRONTEND_BASE_URL}/unsubscribe"),
+        "설정_링크": _escaped_href(f"{FRONTEND_BASE_URL}/user_dashboard"),
+    }
+
+
+def _trend_keyword_block(keyword, topics, related_label="관련 기사 보기 &rsaquo;"):
     """주간 트렌드 이메일의 키워드 1개 블록: 토픽 제목 + 요약 + 관련 기사 링크.
 
     다크모드 대응 클래스(text-title/text-body/link-gold)를 달아, 다크모드 메일에서 카드 배경만
@@ -72,7 +132,7 @@ def _trend_keyword_block(keyword, topics):
         summary = _esc(t.get("summary"))
         link_html = (
             f'<a class="link-gold" href="{_escaped_href(links[0])}" '
-            f'style="color:#a6842f; font-size:13px; font-weight:700; text-decoration:none;">관련 기사 보기 &rsaquo;</a>'
+            f'style="color:#a6842f; font-size:13px; font-weight:700; text-decoration:none;">{related_label}</a>'
             if links else ""
         )
         rows.append(
@@ -91,21 +151,24 @@ def _trend_keyword_block(keyword, topics):
     )
 
 
-def render_weekly_trend(trends, now=None):
+def render_weekly_trend(trends, now=None, language=None, category_labels=None):
     """주간 트렌드 키워드를 '토픽 + 요약 + 관련 기사'로 담은 '별도' 이메일 본문을 렌더링한다.
 
     일간 뉴스레터와 분리된 독립 메일이라 머리말/꼬리말(_HEAD/_TAIL)을 함께 붙여 완성된 HTML을 만든다.
     trends: {keyword: [{"topic", "article_count", "summary", "links": [str,...]}, ...]}
         (pipeline.weekly_trend_articles_for). 비어 있으면 빈 문자열을 반환한다.
-    관련 기사 링크는 그 주 다이제스트에 이미 저장된 것을 그대로 쓴다(추가 수집/LLM 없음).
+    language: 템플릿 골격(이름·날짜·안내·라벨)을 이 언어로 채운다(미지정/미지원 시 한국어).
+        관련 기사 링크는 그 주 다이제스트에 이미 저장된 것을 그대로 쓴다(추가 수집/LLM 없음).
     """
     if not trends:
         return ""
     now = now or datetime.now(pytz.timezone(TIMEZONE))
-    brief = "이번 주 가장 많이 다뤄진 키워드와 관련 기사입니다."
+    t = _texts(language)
+    brief = t["weekly_brief"]
     head = _fill(_HEAD, {
-        "뉴스레터_이름": html.escape(NEWSLETTER_NAME),
-        "발송_날짜": now.strftime("%Y년 %m월 %d일"),
+        "뉴스레터_이름": html.escape(t["name"]),
+        "언어코드": t["lang"],
+        "발송_날짜": _fmt_date(now, language),
         "프리헤더_문구": html.escape(brief),
         "오늘의_핵심_요약": html.escape(brief),
     })
@@ -114,17 +177,16 @@ def render_weekly_trend(trends, now=None):
         '<p class="link-gold" style="margin:0; color:#a6842f; font-size:12px; font-weight:700; letter-spacing:1.5px;">'
         "THIS WEEK'S TREND</p></td></tr>"
     )
-    blocks = "".join(_trend_keyword_block(kw, topics) for kw, topics in trends.items())
-    tail = _fill(_TAIL, {
-        "뉴스레터_이름": html.escape(NEWSLETTER_NAME),
-        "구독취소_링크": _escaped_href(f"{FRONTEND_BASE_URL}/unsubscribe"),
-        "설정_링크": _escaped_href(f"{FRONTEND_BASE_URL}/user_dashboard"),
-    })
+    blocks = "".join(_trend_keyword_block((category_labels or {}).get(kw, kw), topics, t["related"])
+                     for kw, topics in trends.items())
+    tail = _fill(_TAIL, _tail_values(t))
     return head + label + blocks + tail
 
 
-def render(digests, now=None):
-    """다이제스트(이슈→주제→기사 계층)를 메일 HTML 본문으로 렌더링한다.
+def render(digests, now=None, language=None, category_labels=None):
+    """다이제스트(이슈→주제→기사 계층)를 메일 HTML 본문으로 렌더링한다. language 로 템플릿 골격
+    (이름·날짜·"외 총 N건…"·원문 보기·푸터)을 그 언어로 채운다(미지정/미지원 시 한국어).
+    category_labels({원키워드: 표시라벨})가 주어지면 카테고리 태그를 그 라벨로 바꾼다(없으면 원 키워드).
 
     [인터페이스 계약] — 구현 시 아래 입출력 형태를 지켜주세요.
         args:
@@ -144,6 +206,7 @@ def render(digests, now=None):
     (여러 기사를 한 요약이 인용하더라도 "원문 보기"는 한 곳만 가리키는 카드형 레이아웃이므로).
     AI/스크래핑 출처 텍스트는 전부 html.escape, 링크는 전부 _safe_href 를 거친다(각 topic 마다).
     """
+    t = _texts(language)
     items_html = []
     highlight = ""
     for query, issues in digests.items():
@@ -154,29 +217,27 @@ def render(digests, now=None):
             for topic in issue.get("topics") or []:  # 값이 JSON null(None)이어도 안전(기본값은 키 부재 때만 적용됨)
                 links = topic.get("links") or []
                 items_html.append(_fill(_ITEM_BLOCK, {
-                    "카테고리": _esc(query),
+                    "카테고리": _esc((category_labels or {}).get(query, query)),
                     "뉴스_제목": _esc(topic.get("topic") or headline),
                     "요약_본문": _esc(topic.get("topic_summary")),
                     "원문_링크": _escaped_href(links[0] if links else ""),
+                    "원문_보기": t["read_more"],
                 }))
 
     now = now or datetime.now(pytz.timezone(TIMEZONE))
-    highlight = highlight or "오늘의 뉴스 브리핑"
+    highlight = highlight or t["brief_default"]
     brief = (
-        f"{highlight} 외 총 {len(items_html)}건의 뉴스를 정리했습니다."
+        t["brief_multi"].format(highlight=highlight, n=len(items_html))
         if len(items_html) > 1 else highlight
     )
 
     head = _fill(_HEAD, {
-        "뉴스레터_이름": html.escape(NEWSLETTER_NAME),
-        "발송_날짜": now.strftime("%Y년 %m월 %d일"),
+        "뉴스레터_이름": html.escape(t["name"]),
+        "언어코드": t["lang"],
+        "발송_날짜": _fmt_date(now, language),
         "프리헤더_문구": html.escape(brief),
         "오늘의_핵심_요약": html.escape(brief),
     })
-    tail = _fill(_TAIL, {
-        "뉴스레터_이름": html.escape(NEWSLETTER_NAME),
-        "구독취소_링크": _escaped_href(f"{FRONTEND_BASE_URL}/unsubscribe"),
-        "설정_링크": _escaped_href(f"{FRONTEND_BASE_URL}/user_dashboard"),
-    })
+    tail = _fill(_TAIL, _tail_values(t))
 
     return head + "".join(items_html) + tail

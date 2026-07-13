@@ -6,7 +6,7 @@ from decimal import Decimal, InvalidOperation
 import openai
 
 # LLM_fn.py에 이미 구현해 둔 요약 Agent / QA Agent / 관련성 Agent / 길이 프리셋 / 안전 로그 포맷터를 그대로 재사용한다.
-from LLM_fn import _summarize_agent, _qa_agent, _relevance_agent, _safe_error_str, LENGTH_PRESETS
+from LLM_fn import _summarize_agent, _qa_agent, _relevance_agent, _translate_categories, _safe_error_str, LENGTH_PRESETS
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +128,24 @@ def filter_relevant(collected):
     입력과 같은 {query: [item]} 형태를 반환한다(호출부가 그대로 이어 쓸 수 있게).
     """
     return {keyword: _relevant_items(keyword, items) for keyword, items in collected.items()}
+
+
+def translate_categories(keywords, language):
+    """카테고리(구독 키워드) 태그를 language 로 번역한 {원키워드: 번역} 을 돌려준다.
+
+    뉴스 본문은 요약 단계에서 그 언어로 나오지만, 카테고리 태그로 쓰는 키워드는 원문(예: '환율')이라
+    영어 구독자 메일에도 한국어 태그가 남는다 — 이를 번역해 render 의 category_labels 로 넘긴다.
+    한국어이거나(번역 불필요) 키워드가 없으면 빈 dict. 번역 실패(키 없음·API·형식 오류)도 빈 dict 로
+    fail-open — 번역이 안 되면 render 가 원 키워드를 그대로 태그로 쓴다.
+    """
+    kws = [k for k in (keywords or []) if k]
+    if not kws or language == "한국어":
+        return {}
+    try:
+        return {k: v for k, v in _translate_categories(kws, language).items() if k in kws}
+    except Exception as exc:  # 키 없음(RuntimeError)·API·JSON 오류 등 → 원 키워드 유지
+        logger.warning(f"[카테고리 번역] '{language}' 실패 — 원 키워드 유지: {_safe_error_str(exc)}")
+        return {}
 
 
 def summarize(collected, summary_length, language):
