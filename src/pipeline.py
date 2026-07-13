@@ -38,6 +38,8 @@ def run_for_subscriber(sub):
 
     # 1. 수집 (백엔드) — 구독자가 고른 키워드로만
     collected = naver_news.collect(sub.keywords, config.NEWS_DISPLAY)
+    # 1-1. 주제 관련성 필터 — 중의적 키워드('LOL' 등)로 딸려 온 무관 기사를 제외(LLM, fail-open).
+    collected = summarizer.filter_relevant(collected)
     if not any(collected.values()):
         print(f"[발송 건너뜀] {sub.email}: 최근 뉴스 없음")
         return
@@ -87,6 +89,9 @@ def collect_job(now=None):
         print("[수집 잡] 대상 키워드 없음")
         return 0
     collected = naver_news.collect(keywords, config.NEWS_DISPLAY, now=now)
+    # 주제 관련성 필터 — 중의적 키워드('LOL' 등)로 딸려 온 무관 기사를 저장 전에 제외(LLM, fail-open).
+    # 수집 시 한 번만 걸러 두면 이후 요약·발송 단계가 전부 깨끗한 기사만 쓰게 된다.
+    collected = summarizer.filter_relevant(collected)
     saved = db.save_articles(collected, now=now)
     pruned = db.prune_old_articles(now=now)
     print(f"[수집 잡] 키워드 {len(keywords)}개 → 신규 기사 {saved}건 저장, 오래된 기사 {pruned}건 정리")
